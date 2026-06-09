@@ -3,11 +3,15 @@
 # plot_norwegian_data.R
 # =============================================================================
 # Reads all EBI Search raw JSON files (and the joined ENA file), filters for
-# Norwegian entries, normalises institution names, and produces ggplot2 bar
-# charts saved under output/.
+# Norwegian entries, normalises institution names, and produces static ggplot2
+# bar charts + norwegian_entries.csv under output/.
 #
-# The script is also structured to run as a Shiny app – set SHINY=TRUE via
-# environment variable or call it directly with `shiny::runApp("R/")`.
+# The interactive dashboard is a SEPARATE app: shiny/app.R (run with
+# `Rscript -e 'shiny::runApp("shiny")'`).  It reads the CSV this script writes.
+#
+# NOTE: the plot style (make_inst_palette, theme_nor, the grouped/dodged geom)
+# is intentionally duplicated in shiny/app.R — that file must stay self-contained
+# for the WebR/shinylive export.  Keep the two copies in sync.
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -28,7 +32,28 @@ suppressPackageStartupMessages({
   library(glue)
 })
 
-RUN_AS_SHINY <- nzchar(Sys.getenv("SHINY"))  # set env var SHINY=1 to run app
+# Null-coalescing operator: fall back to `b` only when `a` is NULL or empty.
+# (Pure container-safe coalesce — does NOT inspect a[[1]], so passing a list of
+# fields whose first element happens to be empty returns the list unchanged.)
+`%||%` <- function(a, b) {
+  if (is.null(a) || length(a) == 0) return(b)
+  a
+}
+
+#' Return the first present, non-empty, non-NA field value from `fields`,
+#' trying `keys` in priority order; `default` if none match.
+#' Used where several field names may carry the same information (e.g. a title
+#' that may live in name / title / abstract depending on the domain).
+pick_field <- function(fields, keys, default = NA_character_) {
+  for (k in keys) {
+    v <- fields[[k]]
+    if (!is.null(v) && length(v) > 0) {
+      v1 <- as.character(v[[1]])
+      if (!is.na(v1) && nzchar(v1)) return(v1)
+    }
+  }
+  default
+}
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 if (requireNamespace("here", quietly = TRUE)) {
@@ -206,8 +231,7 @@ parse_entry <- function(entry, domain) {
   tibble(
     domain      = domain,
     accession   = entry$id %||% NA_character_,
-    title       = (fields[["name"]] %||% fields[["title"]] %||%
-                   fields[["abstract"]] %||% list(NA_character_))[[1]],
+    title       = pick_field(fields, c("name", "title", "abstract")),
     affiliation = paste(affil_vals, collapse = " | "),
     country     = paste(country_vals, collapse = " | "),
     email       = if (length(email_vals) > 0) email_vals[[1]] else NA_character_,
@@ -465,9 +489,14 @@ plot_time_by_domain <- function(df,
     distinct(time_val, time_label) %>%
     arrange(time_val)
  
+  # Grouped (dodged) bars — one bar per institution per time unit, not stacked.
+  # Kept in sync with shiny/app.R (see header note).
   ggplot(counts, aes(x = time_val, y = n, fill = institution)) +
-    geom_col(width = if (granularity == "year") 0.7 else
-                     if (granularity == "quarter") 0.22 else 0.07) +
+    geom_col(
+      position = position_dodge2(padding = 0.1, preserve = "single"),
+      width    = if (granularity == "year") 0.8 else
+                 if (granularity == "quarter") 0.22 else 0.07
+    ) +
     facet_wrap(~domain_label, scales = "free_y", ncol = 2) +
     scale_fill_manual(values = pal, name = "Institution") +
     scale_x_continuous(
@@ -479,7 +508,7 @@ plot_time_by_domain <- function(df,
     labs(
       title    = "**Norwegian submissions to EBI repositories**",
       subtitle = glue(
-        "Coloured by institution · faceted by repository · granularity: {granularity}"
+        "Grouped by institution · faceted by repository · granularity: {granularity}"
       ),
       x = NULL, y = "Number of entries"
     ) +
@@ -514,121 +543,19 @@ save_plots <- function(df) {
  
  
 # =============================================================================
-# 5.  Shiny app wrapper
+# 5.  Entry point
 # =============================================================================
- 
-shiny_app <- function(df) {
-  require(shiny)
-  require(shinythemes)
-  require(DT)
- 
-  domain_choices <- sort(unique(df$domain_label))
-  year_range     <- range(df$year, na.rm = TRUE)
- 
-  ui <- fluidPage(
-    theme = shinytheme("flatly"),
-    titlePanel("Norwegian EBI Submissions Dashboard"),
-    sidebarLayout(
-      sidebarPanel(
-        width = 3,
- 
-        selectInput("granularity", "Time granularity",
-                    choices  = c("Year" = "year", "Quarter" = "quarter", "Month" = "month"),
-                    selected = "year"),
- 
-        sliderInput("top_n_inst", "Top N institutions (rest → Other Norway)",
-                    min = 3, max = 30, value = 12, step = 1),
- 
-        sliderInput("min_year", "From year",
-                    min   = year_range[1],
-                    max   = year_range[2],
-                    value = max(year_range[1], year_range[2] - 10L),
-                    step  = 1L,
-                    sep   = ""),
 
-        sliderInput("min_domain_entries",
-                    "Min entries per repository (hide smaller ones)",
-                    min = 1, max = 100, value = MIN_DOMAIN_ENTRIES, step = 1),
- 
-        checkboxGroupInput("domains", "Repositories",
-                           choices  = domain_choices,
-                           selected = domain_choices),
- 
-        hr(),
-        p(em(paste("Data fetched:", Sys.Date()))),
-        p(em(paste(nrow(df), "Norwegian entries total")))
-      ),
- 
-      mainPanel(
-        width = 9,
-        plotOutput("main_plot", height = "700px"),
-        hr(),
-        DT::dataTableOutput("entry_table")
-      )
-    )
-  )
- 
-  server <- function(input, output, session) {
-    output$main_plot <- renderPlot({
-      plot_time_by_domain(
-        df,
-        granularity        = input$granularity,
-        top_n_inst         = input$top_n_inst,
-        domains            = input$domains,
-        min_year           = input$min_year,
-        min_domain_entries = input$min_domain_entries
-      )
-    }, res = 120)
- 
-    output$entry_table <- DT::renderDataTable({
-      # Respect the same domain threshold in the table
-      keep <- df %>%
-        filter(domain_label %in% input$domains,
-               !is.na(year), year >= input$min_year) %>%
-        count(domain_label, name = "total") %>%
-        filter(total >= input$min_domain_entries) %>%
-        pull(domain_label)
-      df %>%
-        filter(domain_label %in% keep,
-               !is.na(year), year >= input$min_year) %>%
-        select(Repository = domain_label, Accession = accession,
-               Title = title, Date = date, Institution = institution) %>%
-        arrange(desc(Date))
-    }, options = list(pageLength = 10, scrollX = TRUE), filter = "top")
-  }
- 
-  shinyApp(ui, server)
-}
- 
- 
-# =============================================================================
-# 6.  Entry point
-# =============================================================================
- 
 main <- function() {
   df <- load_all_data()
   message(glue("Loaded {nrow(df)} Norwegian entries across {n_distinct(df$domain)} domains"))
- 
+
   if (nrow(df) == 0) {
     message("No data found – have you run fetch_ebi_data.py yet?")
     return(invisible(NULL))
   }
- 
-  if (RUN_AS_SHINY) {
-    require(DT)
-    shiny_app(df)
-  } else {
-    save_plots(df)
-  }
+
+  save_plots(df)
 }
- 
-# Null-coalescing operator.
-# Safe when a[[1]] is a vector of length > 1 (multi-value API fields).
-`%||%` <- function(a, b) {
-  if (is.null(a) || length(a) == 0) return(b)
-  first <- a[[1]]
-  if (length(first) == 0 || all(is.na(first))) return(b)
-  a
-}
- 
+
 main()

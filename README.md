@@ -125,17 +125,20 @@ Rscript R/plot_norwegian_data.R
 
 ### 3. Launch Shiny app
 
+The interactive dashboard is `shiny/app.R`. It reads the
+`output/norwegian_entries.csv` produced in step 2 (copied to `shiny/data/`
+at export time), so run the render step first.
+
 ```bash
-SHINY=1 Rscript R/plot_norwegian_data.R
-# or from R:
-# source("R/plot_norwegian_data.R")  # then shiny_app(df) manually
+cp output/norwegian_entries.csv shiny/data/norwegian_entries.csv
+Rscript -e 'shiny::runApp("shiny")'
 ```
 
 The Shiny app allows interactive selection of:
-- Plot type (overview / by institution / over time)
 - Time granularity (year / quarter / month)
-- Colour dimension (repository vs institution)
-- Repository filter (checkboxes)
+- Year range (default: last 10 years)
+- Top N institutions (default: 8), with per-institution checkboxes
+- Repository filter (checkboxes) and minimum entries per repository
 
 ---
 

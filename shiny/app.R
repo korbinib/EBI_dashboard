@@ -8,6 +8,10 @@
 # WebR / Shinylive package notes
 # - ggtext excluded (C deps not reliably in WebR); element_text() used instead.
 # - stringdist and jsonlite not needed here.
+#
+# NOTE: the plot style (make_inst_palette, theme_nor, the grouped/dodged geom)
+# is intentionally duplicated from R/plot_norwegian_data.R so this app stays
+# self-contained for the shinylive export.  Keep the two copies in sync.
 # =============================================================================
 
 library(shiny)
