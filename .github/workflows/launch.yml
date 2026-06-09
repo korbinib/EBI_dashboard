@@ -54,30 +54,36 @@ jobs:
             echo "A Snakemake run is already active on the server – skipping launch."
             exit 0
           fi
-
+          
       - name: Pull latest code on server
         run: |
           ssh "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" \
-            "git -C '${{ secrets.REMOTE_WORKDIR }}' pull || git clone https://github.com/${{ github.repository }} '${{ secrets.REMOTE_WORKDIR }}' && \
-             cd '${{ secrets.REMOTE_WORKDIR }}' && \
-             python3 -m venv .venv && \
-             . .venv/bin/activate && \
-             grep -v '^r::' requirements.txt | python3 -m pip install -q -r /dev/stdin && \
-             mkdir -p logs && \
-             Rscript -e '
-               pkgs <- readLines(\"requirements.txt\")
-               pkgs <- pkgs[startsWith(pkgs, \"r::\")]
-               pkgs <- sub(\"^r::\", \"\", pkgs)
-               pkgs <- sub(\";$\", \"\", pkgs)
-               pkgs <- trimws(pkgs)
-               missing <- pkgs[!pkgs %in% installed.packages()[,\"Package\"]]
-               if (length(missing)) {
-                 cat(\"Installing R packages:\", paste(missing, collapse=\", \"), \"\\n\")
-                 install.packages(missing, repos=\"https://cloud.r-project.org\", quiet=TRUE)
-               } else {
-                 cat(\"All R packages already installed\\n\")
-               }
-             '"
+            "git -C '${{ secrets.REMOTE_WORKDIR }}' pull --rebase || { \
+              git -C '${{ secrets.REMOTE_WORKDIR }}' clean -fd && \
+              git -C '${{ secrets.REMOTE_WORKDIR }}' pull; \
+            } || { \
+              rm -rf '${{ secrets.REMOTE_WORKDIR }}' && \
+              git clone https://github.com/${{ github.repository }} '${{ secrets.REMOTE_WORKDIR }}'; \
+            } && \
+            cd '${{ secrets.REMOTE_WORKDIR }}' && \
+            python3 -m venv .venv && \
+            . .venv/bin/activate && \
+            grep -v '^r::' requirements.txt | python3 -m pip install -q -r /dev/stdin && \
+            mkdir -p logs && \
+            Rscript -e '
+              pkgs <- readLines(\"requirements.txt\")
+              pkgs <- pkgs[startsWith(pkgs, \"r::\")]
+              pkgs <- sub(\"^r::\", \"\", pkgs)
+              pkgs <- sub(\";$\", \"\", pkgs)
+              pkgs <- trimws(pkgs)
+              missing <- pkgs[!pkgs %in% installed.packages()[,\"Package\"]]
+              if (length(missing)) {
+                cat(\"Installing R packages:\", paste(missing, collapse=\", \"), \"\\n\")
+                install.packages(missing, repos=\"https://cloud.r-project.org\", quiet=TRUE)
+              } else {
+                cat(\"All R packages already installed\\n\")
+              }
+            '"
 
       - name: Remove stale sentinel (if any)
         run: |
