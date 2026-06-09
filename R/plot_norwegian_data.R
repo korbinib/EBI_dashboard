@@ -100,8 +100,10 @@ parse_ebi_date <- function(x) {
   fmts <- c("Ymd HMS", "Ymd HM", "Ymd", "Y b", "Y-b", "Y-m", "Y/m/d",
             "d/m/Y", "d-m-Y", "d b Y", "b d Y", "Y")
   d <- lubridate::parse_date_time(x, orders = fmts, quiet = TRUE)
-  if (!is.na(d)) return(as.Date(d))
-  NA_Date_
+  if (is.na(d)) return(NA_Date_)
+  d <- as.Date(d)
+  if (d > Sys.Date() + lubridate::years(2)) return(NA_Date_)
+  d
 }
 
 #' Normalise a free-text affiliation string to a canonical institution name.
@@ -335,7 +337,8 @@ load_all_data <- function() {
     mutate(
       domain_label = DOMAIN_LABELS[domain],
       domain_label = if_else(is.na(domain_label), domain, domain_label)
-    )
+    ) %>%
+    filter(!is.na(date))
   df
 }
  

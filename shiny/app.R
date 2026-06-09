@@ -2,25 +2,12 @@
 # =============================================================================
 # shiny/app.R  –  Shinylive-compatible standalone dashboard
 # =============================================================================
-# This file is the entry point for the static Shinylive / GitHub Pages build.
-# It is deliberately self-contained and does NOT share code with
-# R/plot_norwegian_data.R.
-#
-# Data source
-# -----------
-# At CI build time (before shinylive::export() is called) the GitHub Actions
-# workflow copies output/norwegian_entries.csv → shiny/data/norwegian_entries.csv
-# so the file is bundled inside the exported static site.
-# The CSV is produced by R/plot_norwegian_data.R and already contains a fully
-# resolved `institution` column – no JSON parsing or fuzzy matching needed here.
+# Data source: shiny/data/norwegian_entries.csv bundled at CI export time.
+# The CSV is produced by R/plot_norwegian_data.R (institution already resolved).
 #
 # WebR / Shinylive package notes
-# ------------------------------
-# - ggtext is intentionally excluded: element_markdown() is replaced with
-#   element_text() because ggtext's C dependencies (systemfonts / textshaping)
-#   are not reliably available in WebR.
-# - stringdist and jsonlite are not needed (no data processing at runtime).
-# - All remaining packages are available as pre-compiled WebR binaries.
+# - ggtext excluded (C deps not reliably in WebR); element_text() used instead.
+# - stringdist and jsonlite not needed here.
 # =============================================================================
 
 library(shiny)
@@ -57,7 +44,6 @@ df <- readr::read_csv(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-#' Distinct, perceptually-separated palette; "Other Norway" always grey.
 make_inst_palette <- function(institutions) {
   institutions <- as.character(institutions)
   non_other    <- sort(setdiff(institutions, "Other Norway"))
@@ -80,8 +66,6 @@ make_inst_palette <- function(institutions) {
   pal
 }
 
-#' Shared ggplot2 theme.
-#' Uses element_text (not element_markdown) for WebR compatibility.
 theme_nor <- function() {
   theme_classic(base_size = 13) +
     theme(
@@ -96,37 +80,38 @@ theme_nor <- function() {
     )
 }
 
-MIN_DOMAIN_ENTRIES <- 10L   # configurable default; exposed as a Shiny slider
+MIN_DOMAIN_ENTRIES <- 10L
 
-#' Stacked-bar chart coloured by institution, faceted by repository.
+#' Grouped bar chart, one bar per institution per time period, faceted by domain.
+#'
+#' @param selected_inst  Character vector of institution names to show after
+#'   lumping.  NULL means show all (used while the checkbox UI is re-rendering).
 plot_time_by_domain <- function(df,
                                 granularity        = c("year", "quarter", "month"),
-                                top_n_inst         = 12L,
+                                top_n_inst         = 8L,
                                 domains            = NULL,
-                                min_year           = 2000L,
+                                year_range         = NULL,
+                                selected_inst      = NULL,
                                 min_domain_entries = MIN_DOMAIN_ENTRIES) {
   granularity <- match.arg(granularity)
 
   d <- df
-  if (!is.null(domains)) d <- d |> filter(domain_label %in% domains)
-  d <- d |> filter(!is.na(date), year >= min_year, year <= year(Sys.Date()))
+  if (!is.null(domains))                d <- d |> filter(domain_label %in% domains)
+  if (!is.null(year_range) && length(year_range) == 2)
+    d <- d |> filter(year >= year_range[1], year <= year_range[2])
+  d <- d |> filter(!is.na(date), year <= year(Sys.Date()))
 
-  # ── Drop domains below the entry threshold ────────────────────────────────
+  # Drop repositories below entry threshold
   keep_domains <- d |>
     count(domain_label, name = "total") |>
     filter(total >= min_domain_entries) |>
     pull(domain_label)
   d <- d |> filter(domain_label %in% keep_domains)
 
-  if (nrow(d) == 0) {
-    return(
-      ggplot() +
-        labs(title = "No domains meet the minimum entry threshold") +
-        theme_void()
-    )
-  }
+  if (nrow(d) == 0)
+    return(ggplot() + labs(title = "No data for current filters") + theme_void())
 
-  # ── Time axis ────────────────────────────────────────────────────────────
+  # Time axis
   d <- switch(granularity,
     year    = d |> mutate(time_val   = as.integer(year),
                           time_label = as.character(year)),
@@ -136,15 +121,19 @@ plot_time_by_domain <- function(df,
                           time_label = format(date, "%Y\n%b"))
   )
 
-  # ── Institution lumping ──────────────────────────────────────────────────
+  # Lump institutions outside top N into "Other Norway"
   top_inst <- d |> count(institution, sort = TRUE) |>
     slice_head(n = top_n_inst) |> pull(institution)
+  d <- d |> mutate(institution = if_else(institution %in% top_inst,
+                                         institution, "Other Norway"))
 
-  d <- d |>
-    mutate(institution = if_else(institution %in% top_inst,
-                                 institution, "Other Norway"))
+  # Apply institution checkbox filter (NULL = show all, used during re-render)
+  if (!is.null(selected_inst) && length(selected_inst) > 0)
+    d <- d |> filter(institution %in% selected_inst)
 
-  # ── Aggregate ────────────────────────────────────────────────────────────
+  if (nrow(d) == 0)
+    return(ggplot() + labs(title = "No institutions selected") + theme_void())
+
   counts <- d |>
     count(domain_label, time_val, time_label, institution, name = "n") |>
     mutate(institution = fct_reorder(institution, n, .fun = sum) |>
@@ -153,9 +142,14 @@ plot_time_by_domain <- function(df,
   pal      <- make_inst_palette(levels(counts$institution))
   x_labels <- counts |> distinct(time_val, time_label) |> arrange(time_val)
 
+  # Per-granularity group width: bars within a time unit span this fraction
+  bar_width <- switch(granularity, year = 0.8, quarter = 0.22, month = 0.07)
+
   ggplot(counts, aes(x = time_val, y = n, fill = institution)) +
-    geom_col(width = if (granularity == "year")    0.70 else
-                     if (granularity == "quarter") 0.22 else 0.07) +
+    geom_col(
+      position = position_dodge2(padding = 0.1, preserve = "single"),
+      width    = bar_width
+    ) +
     facet_wrap(~domain_label, scales = "free_y", ncol = 2) +
     scale_fill_manual(values = pal, name = "Institution") +
     scale_x_continuous(
@@ -170,18 +164,17 @@ plot_time_by_domain <- function(df,
     labs(
       title    = "Norwegian submissions to EBI repositories",
       subtitle = glue(
-        "Coloured by institution \u00b7 faceted by repository \u00b7 granularity: {granularity}"
+        "Grouped by institution · faceted by repository · {granularity}"
       ),
-      x = NULL,
-      y = "Number of entries"
+      x = NULL, y = "Number of entries"
     ) +
     theme_nor()
 }
 
 # ── Derived constants ─────────────────────────────────────────────────────────
 domain_choices <- sort(unique(df$domain_label))
-year_range     <- range(df$year, na.rm = TRUE)
-latest_date    <- max(df$date,   na.rm = TRUE)
+year_range_data <- range(df$year, na.rm = TRUE)
+latest_date     <- max(df$date, na.rm = TRUE)
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 ui <- fluidPage(
@@ -198,23 +191,25 @@ ui <- fluidPage(
         selected = "year"
       ),
 
+      # Two-handle year range; default: last 10 years to current year
       sliderInput(
-        "top_n_inst", "Top N institutions (rest \u2192 Other Norway)",
-        min = 3, max = 30, value = 12, step = 1
-      ),
-
-      sliderInput(
-        "min_year", "From year",
-        min   = year_range[1],
-        max   = year_range[2],
-        value = max(year_range[1], year_range[2] - 10L),
+        "year_range", "Year range",
+        min   = year_range_data[1],
+        max   = year_range_data[2],
+        value = c(max(year_range_data[1], year_range_data[2] - 10L),
+                  year_range_data[2]),
         step  = 1L,
         sep   = ""
       ),
 
       sliderInput(
+        "top_n_inst", "Top N institutions",
+        min = 3, max = 30, value = 8L, step = 1
+      ),
+
+      sliderInput(
         "min_domain_entries",
-        "Min entries per repository (hide smaller ones)",
+        "Min entries per repository",
         min = 1, max = 100, value = MIN_DOMAIN_ENTRIES, step = 1
       ),
 
@@ -223,6 +218,11 @@ ui <- fluidPage(
         choices  = domain_choices,
         selected = domain_choices
       ),
+
+      hr(),
+      # Dynamic institution list: rebuilt when top_n or domain/year filters change.
+      # All top-N institutions are ticked by default; user may untick to hide.
+      uiOutput("inst_checkbox"),
 
       hr(),
       p(em(paste("Latest entry:", format(latest_date, "%Y-%m-%d")))),
@@ -241,39 +241,73 @@ ui <- fluidPage(
 # ── Server ────────────────────────────────────────────────────────────────────
 server <- function(input, output, session) {
 
+  # Top N institutions for the current domain + year filter.
+  # Used both to populate the checkbox and to drive the lump in the plot.
+  top_institutions <- reactive({
+    req(input$top_n_inst, input$year_range)
+    d <- df
+    if (!is.null(input$domains))
+      d <- d |> filter(domain_label %in% input$domains)
+    d <- d |> filter(year >= input$year_range[1], year <= input$year_range[2])
+
+    top_inst <- d |>
+      count(institution, sort = TRUE) |>
+      slice_head(n = input$top_n_inst) |>
+      pull(institution)
+
+    # Always include "Other Norway" so the user can toggle it
+    unique(c(top_inst, "Other Norway"))
+  })
+
+  # Rebuild the checkbox whenever the institution list changes.
+  # All entries ticked by default; selections reset when the list changes.
+  output$inst_checkbox <- renderUI({
+    inst <- top_institutions()
+    checkboxGroupInput(
+      "selected_inst", "Show institutions",
+      choices  = inst,
+      selected = inst
+    )
+  })
+
   output$main_plot <- renderPlot({
+    req(input$year_range)
     plot_time_by_domain(
       df,
       granularity        = input$granularity,
       top_n_inst         = input$top_n_inst,
       domains            = input$domains,
-      min_year           = input$min_year,
+      year_range         = input$year_range,
+      selected_inst      = input$selected_inst,
       min_domain_entries = input$min_domain_entries
     )
   }, res = 120)
 
   output$entry_table <- DT::renderDataTable({
+    req(input$year_range)
     keep <- df |>
       filter(domain_label %in% input$domains,
-             !is.na(year), year >= input$min_year) |>
+             !is.na(year),
+             year >= input$year_range[1],
+             year <= input$year_range[2]) |>
       count(domain_label, name = "total") |>
       filter(total >= input$min_domain_entries) |>
       pull(domain_label)
     df |>
       filter(domain_label %in% keep,
-             !is.na(year), year >= input$min_year) |>
+             !is.na(year),
+             year >= input$year_range[1],
+             year <= input$year_range[2]) |>
       select(
-        Repository   = domain_label,
-        Accession    = accession,
-        Title        = title,
-        Date         = date,
-        Institution  = institution,
-        Email        = email
+        Repository  = domain_label,
+        Accession   = accession,
+        Title       = title,
+        Date        = date,
+        Institution = institution,
+        Email       = email
       ) |>
       arrange(desc(Date))
   }, options = list(pageLength = 10, scrollX = TRUE), filter = "top")
-
 }
 
-# ── Launch ────────────────────────────────────────────────────────────────────
 shinyApp(ui, server)
