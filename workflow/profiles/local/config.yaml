@@ -1,0 +1,21 @@
+# workflow/profiles/local/config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Snakemake profile for running on a single standalone node.
+#
+# The ebi_conns pool size is set via --resources ebi_conns=N on the command
+# line (or in a cluster profile). Rules that don't declare ebi_conns default
+# to 0 (Snakemake's built-in default for undeclared resources).
+
+cores: 2
+
+# Re-run rules when params change (drives the daily run_date trigger in fetch_domain)
+rerun-triggers:
+  - params
+  - input
+  - software-env
+
+# Write shell commands to the log for easier debugging
+printshellcmds: true
+
+# Keep going if one domain fails; report all failures at the end
+keep-going: true

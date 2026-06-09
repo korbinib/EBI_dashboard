@@ -1,0 +1,418 @@
+{
+  "_comment": "Norwegian institution name normalisation map for EBI Search affiliations. Each entry has canonical name, ROR ID where known, primary web/email domain for institution guessing from submitter email addresses, and regex patterns (case-insensitive) that match typical ways the institution appears in database submission fields.",
+
+  "institutions": [
+
+    {
+      "canonical": "University of Oslo",
+      "canonical_no": "Universitetet i Oslo",
+      "abbrev": "UiO",
+      "ror": "https://ror.org/01xtthb56",
+      "web_domain": "uio.no",
+      "patterns": [
+        "Univ[ae]rsit[ae]t[a-z]* [io] Oslo",
+        "University of Oslo",
+        "\\bUiO\\b",
+        "\\bUIO\\b"
+      ]
+    },
+    {
+      "canonical": "University of Bergen",
+      "canonical_no": "Universitetet i Bergen",
+      "abbrev": "UiB",
+      "ror": "https://ror.org/03zga2b32",
+      "web_domain": "uib.no",
+      "patterns": [
+        "Univ[ae]rsit[ae]t[a-z]* [io] Bergen",
+        "University of Bergen",
+        "\\bUiB\\b",
+        "\\bUIB\\b"
+      ]
+    },
+    {
+      "canonical": "Norwegian University of Science and Technology",
+      "canonical_no": "Norges teknisk-naturvitenskapelige universitet",
+      "abbrev": "NTNU",
+      "ror": "https://ror.org/05xg72x27",
+      "web_domain": "ntnu.no",
+      "patterns": [
+        "Norwegian University of Science and Technology",
+        "Norges teknisk-naturvitenskapelige",
+        "\\bNTNU\\b",
+        "NTNU(?!\\s*Samfunn)"
+      ]
+    },
+    {
+      "canonical": "UiT The Arctic University of Norway",
+      "canonical_no": "UiT Norges arktiske universitet",
+      "abbrev": "UiT",
+      "ror": "https://ror.org/00wge5k78",
+      "web_domain": "uit.no",
+      "patterns": [
+        "UiT.*Arctic",
+        "Arctic University of Norway",
+        "Norges arktiske",
+        "University of Troms[ø o]",
+        "Universitetet [io] Troms[ø o]",
+        "\\bUiT\\b",
+        "\\bUIT\\b"
+      ]
+    },
+    {
+      "canonical": "University of Stavanger",
+      "canonical_no": "Universitetet i Stavanger",
+      "abbrev": "UiS",
+      "ror": "https://ror.org/02qte9q33",
+      "web_domain": "uis.no",
+      "patterns": [
+        "University of Stavanger",
+        "Univ[ae]rsit[ae]t[a-z]* [io] Stavanger",
+        "\\bUiS\\b",
+        "\\bUIS\\b"
+      ]
+    },
+    {
+      "canonical": "University of Agder",
+      "canonical_no": "Universitetet i Agder",
+      "abbrev": "UiA",
+      "ror": "https://ror.org/03x297z98",
+      "web_domain": "uia.no",
+      "patterns": [
+        "University of Agder",
+        "Univ[ae]rsit[ae]t[a-z]* [io] Agder",
+        "\\bUiA\\b",
+        "\\bUIA\\b"
+      ]
+    },
+    {
+      "canonical": "Norwegian University of Life Sciences",
+      "canonical_no": "Norges miljø- og biovitenskapelige universitet",
+      "abbrev": "NMBU",
+      "ror": "https://ror.org/04a1mvv97",
+      "web_domain": "nmbu.no",
+      "patterns": [
+        "Norwegian University of Life Sciences",
+        "Norges milj[øo].*biovitenskapelige",
+        "\\bNMBU\\b",
+        "Norwegian College of Veterinary Medicine",
+        "Norges veterin[æa]rh[øo]gskole",
+        "\\bNVH\\b"
+      ]
+    },
+    {
+      "canonical": "Nord University",
+      "canonical_no": "Nord universitet",
+      "abbrev": "Nord",
+      "ror": "https://ror.org/030mwrt98",
+      "web_domain": "nord.no",
+      "patterns": [
+        "Nord University",
+        "Nord [Uu]niversitet",
+        "\\bNord\\s+[Uu]ni"
+      ]
+    },
+    {
+      "canonical": "OsloMet – Oslo Metropolitan University",
+      "canonical_no": "OsloMet – storbyuniversitetet",
+      "abbrev": "OsloMet",
+      "ror": "https://ror.org/04q12yn84",
+      "web_domain": "oslomet.no",
+      "patterns": [
+        "OsloMet",
+        "Oslo Metropolitan",
+        "Oslo and Akershus",
+        "H[øo]gskolen i Oslo og Akershus",
+        "\\bHiOA\\b"
+      ]
+    },
+    {
+      "canonical": "Western Norway University of Applied Sciences",
+      "canonical_no": "Høgskulen på Vestlandet",
+      "abbrev": "HVL",
+      "ror": "https://ror.org/05phns765",
+      "web_domain": "hvl.no",
+      "patterns": [
+        "Western Norway University of Applied Sciences",
+        "H[øo]gskulen p[å a] Vestlandet",
+        "\\bHVL\\b"
+      ]
+    },
+    {
+      "canonical": "University of South-Eastern Norway",
+      "canonical_no": "Universitetet i Sørøst-Norge",
+      "abbrev": "USN",
+      "ror": "https://ror.org/05ecg5h20",
+      "web_domain": "usn.no",
+      "patterns": [
+        "University of South-?Eastern Norway",
+        "Univ[ae]rsit[ae]t[a-z]* [io] S[øo]r[øo]st-?Norge",
+        "\\bUSN\\b",
+        "H[øo]gskolen [io] S[øo]r[øo]st-?Norge",
+        "\\bHSN\\b"
+      ]
+    },
+    {
+      "canonical": "Inland Norway University of Applied Sciences",
+      "canonical_no": "Høgskolen i Innlandet",
+      "abbrev": "INN",
+      "ror": "https://ror.org/02dx4dc92",
+      "web_domain": "inn.no",
+      "patterns": [
+        "Inland Norway University",
+        "H[øo]gskolen i Innlandet",
+        "\\bHINT\\b",
+        "\\bINN\\b"
+      ]
+    },
+    {
+      "canonical": "Oslo University Hospital",
+      "canonical_no": "Oslo universitetssykehus",
+      "abbrev": "OUS",
+      "ror": "https://ror.org/00j9c2840",
+      "web_domain": "ous.no",
+      "patterns": [
+        "Oslo University Hospital",
+        "Oslo [Uu]niversitetssykehus",
+        "\\bOUS\\b",
+        "Rikshospitalet",
+        "Radiumhospitalet",
+        "Ullevål(?:\\s+[Uu]niversity)?\\s+[Hh]ospital",
+        "National Hospital of Norway"
+      ]
+    },
+    {
+      "canonical": "Haukeland University Hospital",
+      "canonical_no": "Haukeland universitetssjukehus",
+      "abbrev": "HUS",
+      "ror": "https://ror.org/03np4e098",
+      "web_domain": "helse-bergen.no",
+      "patterns": [
+        "Haukeland",
+        "\\bHUS\\b"
+      ]
+    },
+    {
+      "canonical": "St. Olavs Hospital",
+      "canonical_no": "St. Olavs hospital",
+      "abbrev": "StOlavs",
+      "ror": "https://ror.org/01a4hbq44",
+      "web_domain": "stolav.no",
+      "patterns": [
+        "St\\.? Olavs",
+        "Trondheim University Hospital"
+      ]
+    },
+    {
+      "canonical": "University Hospital of North Norway",
+      "canonical_no": "Universitetssykehuset Nord-Norge",
+      "abbrev": "UNN",
+      "ror": "https://ror.org/030v5kp38",
+      "web_domain": "unn.no",
+      "patterns": [
+        "University Hospital of North Norway",
+        "Universitetssykehuset Nord-?Norge",
+        "\\bUNN\\b"
+      ]
+    },
+    {
+      "canonical": "Akershus University Hospital",
+      "canonical_no": "Akershus universitetssykehus",
+      "abbrev": "Ahus",
+      "ror": "https://ror.org/0331wat71",
+      "web_domain": "ahus.no",
+      "patterns": [
+        "Akershus University Hospital",
+        "Akershus [Uu]niversitetssykehus",
+        "\\bAhus\\b",
+        "\\bAHUS\\b"
+      ]
+    },
+    {
+      "canonical": "SINTEF",
+      "canonical_no": "SINTEF",
+      "abbrev": "SINTEF",
+      "ror": "https://ror.org/01f677e56",
+      "web_domain": "sintef.no",
+      "patterns": [
+        "\\bSINTEF\\b",
+        "The Foundation for Scientific and Industrial Research",
+        "Stiftelsen for Industriell og Teknisk Forskning"
+      ]
+    },
+    {
+      "canonical": "NORCE Norwegian Research Centre",
+      "canonical_no": "NORCE Norwegian Research Centre",
+      "abbrev": "NORCE",
+      "ror": "https://ror.org/02gagpf75",
+      "web_domain": "norceresearch.no",
+      "patterns": [
+        "\\bNORCE\\b",
+        "Norwegian Research Centre",
+        "NORCE"
+      ]
+    },
+    {
+      "canonical": "Institute of Marine Research",
+      "canonical_no": "Havforskningsinstituttet",
+      "abbrev": "IMR",
+      "ror": "https://ror.org/05vg74d16",
+      "web_domain": "hi.no",
+      "patterns": [
+        "Institute of Marine Research",
+        "Havforskningsinstituttet",
+        "\\bIMR\\b",
+        "\\bHI\\b(?=.*[Nn]orway|.*[Nn]orsk)"
+      ]
+    },
+    {
+      "canonical": "Norwegian Institute of Public Health",
+      "canonical_no": "Folkehelseinstituttet",
+      "abbrev": "FHI",
+      "ror": "https://ror.org/046nvst19",
+      "web_domain": "fhi.no",
+      "patterns": [
+        "Norwegian Institute of Public Health",
+        "Folkehelseinstituttet",
+        "\\bFHI\\b",
+        "\\bNIPH\\b"
+      ]
+    },
+    {
+      "canonical": "Norwegian Institute for Air Research",
+      "canonical_no": "Norsk institutt for luftforskning",
+      "abbrev": "NILU",
+      "ror": "Norwegian Institute for Air Research",
+      "web_domain": "nilu.no",
+      "patterns": [
+        "Norwegian Institute for Air Research",
+        "Norsk [Ii]nstitutt for luftforskning",
+        "\\bNILU\\b"
+      ]
+    },
+    {
+      "canonical": "Norwegian Institute for Nature Research",
+      "canonical_no": "Norsk institutt for naturforskning",
+      "abbrev": "NINA",
+      "ror": "https://ror.org/04aha0598",
+      "web_domain": "nina.no",
+      "patterns": [
+        "Norwegian Institute for Nature Research",
+        "Norsk [Ii]nstitutt for naturforskning",
+        "\\bNINA\\b"
+      ]
+    },
+    {
+      "canonical": "Norwegian Institute for Water Research",
+      "canonical_no": "Norsk institutt for vannforskning",
+      "abbrev": "NIVA",
+      "ror": "https://ror.org/03hrf8236",
+      "web_domain": "niva.no",
+      "patterns": [
+        "Norwegian Institute for Water Research",
+        "Norsk [Ii]nstitutt for vannforskning",
+        "\\bNIVA\\b"
+      ]
+    },
+    {
+      "canonical": "NIBIO – Norwegian Institute of Bioeconomy Research",
+      "canonical_no": "NIBIO – Norsk institutt for bioøkonomi",
+      "abbrev": "NIBIO",
+      "ror": "https://ror.org/04aah1z61",
+      "web_domain": "nibio.no",
+      "patterns": [
+        "\\bNIBIO\\b",
+        "Norwegian Institute of Bioeconomy",
+        "Norsk [Ii]nstitutt for bio[øo]konomi"
+      ]
+    },
+    {
+      "canonical": "Nofima",
+      "canonical_no": "Nofima",
+      "abbrev": "Nofima",
+      "ror": "https://ror.org/02v1rsx93",
+      "web_domain": "nofima.no",
+      "patterns": [
+        "\\bNofima\\b",
+        "Norwegian Institute of Food, Fisheries and Aquaculture Research",
+        " Matforskningsinstituttet"
+      ]
+    },
+    {
+      "canonical": "Veterinary Institute",
+      "canonical_no": "Veterinærinstituttet",
+      "abbrev": "VI",
+      "ror": "https://ror.org/05m6y3182",
+      "web_domain": "vetinst.no",
+      "patterns": [
+        "Veterin[æa]rinstituttet",
+        "Norwegian Veterinary Institute",
+        "\\bVI\\b(?=.*[Nn]orway|.*[Nn]orsk)"
+      ]
+    },
+    {
+      "canonical": "Nansen Environmental and Remote Sensing Center",
+      "canonical_no": "Nansen Senter for Miljø og Fjernmåling",
+      "abbrev": "NERSC",
+      "ror": "https://ror.org/05ey0h058",
+      "web_domain": "nersc.no",
+      "patterns": [
+        "Nansen.*Remote Sensing",
+        "Nansen.*Milj[øo]",
+        "\\bNERSC\\b"
+      ]
+    },
+    {
+      "canonical": "Norwegian Computing Center",
+      "canonical_no": "Norsk Regnesentral",
+      "abbrev": "NR",
+      "ror": "https://ror.org/02gm7te43",
+      "web_domain": "nr.no",
+      "patterns": [
+        "Norwegian Computing Center",
+        "Norsk [Rr]egnesentral",
+        "\\bNR\\b(?=.*[Nn]orway|.*[Nn]orsk)"
+      ]
+    },
+    {
+      "canonical": "Equinor",
+      "canonical_no": "Equinor",
+      "abbrev": "Equinor",
+      "ror": "https://ror.org/01tgbwf83",
+      "web_domain": "equinor.com",
+      "patterns": [
+        "\\bEquinor\\b",
+        "\\bStatoil\\b"
+      ]
+    },
+    {
+      "canonical": "Norwegian Cancer Registry",
+      "canonical_no": "Kreftregisteret",
+      "abbrev": "NCR",
+      "ror": "https://ror.org/03sm1ej59",
+      "web_domain": "kreftregisteret.no",
+      "patterns": [
+        "Norwegian Cancer Registry",
+        "Kreftregisteret",
+        "Cancer Registry of Norway",
+        "\\bNCR\\b(?=.*[Nn]orway)"
+      ]
+    },
+    {
+      "canonical": "Norwegian National Advisory Unit on Rare Disorders",
+      "canonical_no": "Frambu",
+      "abbrev": "Frambu",
+      "ror": null,
+      "web_domain": "frambu.no",
+      "patterns": [
+        "\\bFrambu\\b"
+      ]
+    }
+  ],
+
+  "norway_indicators": [
+    "Norway", "Norge", "Norwegian", "Norsk",
+    "Oslo", "Bergen", "Trondheim", "Troms[øo]", "Stavanger",
+    "Kristiansand", "Tromsø", "Tromsoe", "Bodø", "Bodoe",
+    "Ålesund", "Alesund", "Drammen", "Fredrikstad"
+  ]
+}

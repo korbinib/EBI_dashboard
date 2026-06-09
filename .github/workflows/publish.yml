@@ -1,0 +1,163 @@
+name: Publish results
+
+# ── Trigger ───────────────────────────────────────────────────────────────────
+# Runs hourly.  Most runs exit in seconds (sentinel absent → no-op).
+# The one run that finds the sentinel does the full publish.
+on:
+  schedule:
+    - cron: "0 */3 * * *"   # every hour at :00
+  workflow_dispatch:       # manual trigger for testing
+
+# ── Permissions ───────────────────────────────────────────────────────────────
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  poll_and_publish:
+    name: "Poll sentinel and publish"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30    # scp + Pages deploy; should complete well within this
+
+    environment:
+      name: github-pages
+      url: ${{ steps.pages_deploy.outputs.page_url }}
+
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.REMOTE_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          printf 'Host *\n  ServerAliveInterval 60\n  ServerAliveCountMax 10\n' \
+            >> ~/.ssh/config
+
+      - name: Check for sentinel
+        id: check_sentinel
+        run: |
+          SENTINEL=$(ssh "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" \
+            "test -f '${{ secrets.REMOTE_WORKDIR }}/output/.run_complete' \
+             && cat '${{ secrets.REMOTE_WORKDIR }}/output/.run_complete' \
+             || echo ''")
+          echo "sentinel=${SENTINEL}" >> "$GITHUB_OUTPUT"
+          if [ -z "$SENTINEL" ]; then
+            echo "No sentinel found – pipeline not done yet. Exiting."
+          else
+            echo "Sentinel found: ${SENTINEL} – proceeding with publish."
+          fi
+
+      # ── Everything below only runs when the sentinel exists ────────────────
+      - name: Checkout repository
+        if: steps.check_sentinel.outputs.sentinel != ''
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Copy results from server
+        if: steps.check_sentinel.outputs.sentinel != ''
+        run: |
+          mkdir -p data/processed output
+
+          # Processed join result (~few MB)
+          scp "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:\
+          ${{ secrets.REMOTE_WORKDIR }}/data/processed/*.json" \
+            data/processed/
+
+          # Domain config snapshot
+          scp "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:\
+          ${{ secrets.REMOTE_WORKDIR }}/data/domains.json" \
+            data/domains.json
+
+          # Plots and CSV
+          scp "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:\
+          ${{ secrets.REMOTE_WORKDIR }}/output/*.csv" \
+            output/
+          scp "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:\
+          ${{ secrets.REMOTE_WORKDIR }}/output/*.png" \
+            output/ || true   # PNGs may not exist on the very first run
+
+          # CSV for Shinylive
+          mkdir -p shiny/data
+          cp output/norwegian_entries.csv shiny/data/norwegian_entries.csv
+
+      - name: Set up R for Shinylive export
+        if: steps.check_sentinel.outputs.sentinel != ''
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.4"
+
+      - name: Install shinylive
+        if: steps.check_sentinel.outputs.sentinel != ''
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+             cran::shinylive
+             cran::dplyr
+             cran::DT
+             cran::forcats
+             cran::ggplot2
+             cran::lubridate
+             cran::RColorBrewer
+             cran::readr
+             cran::scales
+             cran::shinythemes
+          cache-version: shinylive-1
+
+      - name: Export Shinylive app
+        if: steps.check_sentinel.outputs.sentinel != ''
+        shell: Rscript {0}
+        run: shinylive::export(appdir = "shiny", destdir = "docs")
+
+      - name: Upload Pages artifact
+        if: steps.check_sentinel.outputs.sentinel != ''
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: "docs"
+
+      - name: Deploy to GitHub Pages
+        if: steps.check_sentinel.outputs.sentinel != ''
+        id: pages_deploy
+        uses: actions/deploy-pages@v5
+
+      - name: Commit results to main
+        if: steps.check_sentinel.outputs.sentinel != ''
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f data/processed/ data/domains.json output/
+          if git diff --cached --quiet; then
+            echo "Nothing changed – skipping commit."
+          else
+            RUN_DATE=$(date -u +%Y-%m-%d)
+            git commit -m "dashboard: weekly update ${RUN_DATE}"
+            git push origin main
+          fi
+
+      - name: Consume sentinel (prevents double-publish)
+        if: steps.check_sentinel.outputs.sentinel != ''
+        run: |
+          ssh "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" \
+            "rm -f '${{ secrets.REMOTE_WORKDIR }}/output/.run_complete'"
+
+      - name: Stale-run alarm
+        # Warn (but don't fail) if the sentinel has been missing for > 48 h.
+        # This catches runs that died silently (Snakemake error, node reboot, etc.)
+        # The launch job removes the sentinel and fires Snakemake each Monday;
+        # if Tuesday's poll still finds nothing, something went wrong.
+        if: steps.check_sentinel.outputs.sentinel == ''
+        run: |
+          LAST_LAUNCH=$(ssh "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" \
+            "ls -t '${{ secrets.REMOTE_WORKDIR }}/logs/snakemake_'*.log 2>/dev/null \
+             | head -1 | xargs -I{} stat -c %Y {} 2>/dev/null || echo 0")
+          NOW=$(date +%s)
+          AGE=$(( NOW - LAST_LAUNCH ))
+          HOURS=$(( AGE / 3600 ))
+          if [ "$LAST_LAUNCH" -eq 0 ]; then
+            echo "No Snakemake log found – first run or logs were cleared."
+          elif [ "$HOURS" -gt 48 ]; then
+            echo "::warning::Snakemake last ran ${HOURS}h ago but sentinel is still missing. Check logs on the server."
+          else
+            echo "Last Snakemake run was ${HOURS}h ago – pipeline likely still running."
+          fi

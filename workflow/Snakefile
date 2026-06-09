@@ -1,0 +1,176 @@
+"""
+workflow/Snakefile
+==================
+Snakemake DAG for the EBI Norway Dashboard.
+
+Execution (standalone node)
+----------------------------
+  # full run from the repo root:
+  snakemake --profile workflow/profiles/local
+
+  # re-run only render + downstream (e.g. after editing the R script):
+  snakemake --profile workflow/profiles/local output/norwegian_entries.csv
+
+  # force a specific domain to re-fetch even if latest.json is fresh:
+  snakemake --profile workflow/profiles/local --forcerun fetch_domain \
+            -- data/raw/pride/latest.json
+
+Pipeline stages
+---------------
+  write_domains_json  →  fetch_domain (×N, parallel, capped by ebi_conns)
+                      →  join_ena
+                      →  render
+                      →  shinylive_export
+                      →  done          (sentinel written last)
+
+The sentinel file output/.run_complete is watched by publish.yml to know
+when the pipeline has finished and results are ready to pull.
+"""
+
+import json
+import sys as _sys
+from pathlib import Path
+
+# ── Domain list: import directly from the Python source (single source of truth)
+# Reading data/domains.json risks using a stale snapshot that lists removed
+# domains, causing the DAG to include phantom fetch jobs that fail immediately
+# because fetch_one_domain.py only accepts domains present in the DOMAINS dict.
+_sys.path.insert(0, str(Path("scripts").resolve()))
+from fetch_ebi_data import DOMAINS as _FED_DOMAINS
+
+DOMAINS = list(_FED_DOMAINS.keys())
+SRA_DOMAINS = [d for d in DOMAINS if d.startswith("sra-")]
+STANDARD_DOMAINS = [d for d in DOMAINS if not d.startswith("sra-")]
+
+# ── Output targets ─────────────────────────────────────────────────────────────
+
+rule all:
+    """Default target: run the full pipeline."""
+    input:
+        "output/.run_complete"
+
+
+# ── Stage 0: write domains.json ───────────────────────────────────────────────
+
+rule write_domains_json:
+    """
+    Write data/domains.json from the Python DOMAINS dict.
+
+    data/domains.json is gitignored (auto-generated) so it is always absent
+    after a fresh git pull, which is sufficient to trigger this rule.  The
+    file is an informational snapshot for humans and the fetch_domain ordering
+    dependency — fetch_one_domain.py reads config directly from the DOMAINS
+    dict in fetch_ebi_data.py, not from this file.
+    """
+    output: "data/domains.json"
+    shell:
+        "python3 scripts/fetch_ebi_data.py --list-domains"
+
+
+# ── Stage 1: fetch each domain ────────────────────────────────────────────────
+
+rule fetch_domain:
+    """
+    Fetch + filter a single EBI Search domain.
+
+    The script implements the incremental cache internally:
+      - Years ≤ (current_year - 2) are served from disk if the partition
+        file is present and passes its sha256 check.
+      - The current year and previous year are always re-fetched.
+
+    Snakemake is told to always re-run this rule (via params.run_date which
+    changes every day) so the incremental logic inside the script decides
+    what actually gets downloaded.
+
+    ebi_conns=1 means this rule consumes one slot of the global ebi_conns
+    pool (set via --resources ebi_conns=4 on the command line), capping how
+    many domain fetches run simultaneously.
+    """
+    input:  "data/domains.json"
+    output: "data/raw/{domain}/latest.json"
+    params:
+        run_date = lambda wc: __import__("datetime").date.today().isoformat()
+    resources:
+        ebi_conns = 1
+    log:
+        "logs/fetch_{domain}.log"
+    shell:
+        "python3 scripts/fetch_one_domain.py {wildcards.domain} > {log} 2>&1"
+
+
+# ── Stage 2: join SRA sub-tables ──────────────────────────────────────────────
+
+rule join_ena:
+    """
+    Join the six sra-* latest.json files into data/processed/ena_joined.json.
+    Applies the Norwegian filter post-join.
+    """
+    input:
+        expand("data/raw/{domain}/latest.json", domain=SRA_DOMAINS)
+    output:
+        "data/processed/ena_joined.json"
+    log:
+        "logs/join_ena.log"
+    shell:
+        "python3 scripts/join_ena.py > {log} 2>&1"
+
+
+# ── Stage 3: render R plots and CSV ───────────────────────────────────────────
+
+rule render:
+    """
+    Read all latest.json files + ena_joined.json, produce plots and the
+    norwegian_entries.csv consumed by both the commit job and Shinylive.
+    """
+    input:
+        ena      = "data/processed/ena_joined.json",
+        standard = expand("data/raw/{domain}/latest.json",
+                          domain=STANDARD_DOMAINS),
+    output:
+        csv      = "output/norwegian_entries.csv",
+        year_png = "output/norwegian_ebi_year.png",
+        qtr_png  = "output/norwegian_ebi_quarter.png",
+        month_png= "output/norwegian_ebi_month.png",
+    log:
+        "logs/render.log"
+    shell:
+        "Rscript R/plot_norwegian_data.R > {log} 2>&1"
+
+
+# ── Stage 4: export Shinylive static app ──────────────────────────────────────
+
+rule shinylive_export:
+    """
+    Bundle the CSV into shiny/data/ and export the static Shinylive site to
+    docs/.  The publish job deploys docs/ to GitHub Pages.
+    """
+    input:
+        "output/norwegian_entries.csv"
+    output:
+        directory("docs")
+    log:
+        "logs/shinylive_export.log"
+    shell:
+        """
+        mkdir -p shiny/data
+        cp output/norwegian_entries.csv shiny/data/norwegian_entries.csv
+        Rscript -e 'shinylive::export("shiny", "docs")' >> {log} 2>&1
+        """
+
+
+# ── Stage 5: write sentinel ────────────────────────────────────────────────────
+
+rule done:
+    """
+    Write the sentinel file output/.run_complete.
+    The publish.yml GitHub Actions workflow polls for this file.
+    It is only written after all upstream rules succeed.
+    """
+    input:
+        "output/norwegian_entries.csv",
+        "output/norwegian_ebi_year.png",
+        "docs",
+    output:
+        "output/.run_complete"
+    shell:
+        "date -u +%Y-%m-%dT%H:%M:%SZ > {output}"

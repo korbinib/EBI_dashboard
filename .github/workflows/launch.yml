@@ -1,0 +1,102 @@
+name: Launch pipeline
+
+# ── Trigger ───────────────────────────────────────────────────────────────────
+# Weekly schedule + manual dispatch.
+# The pipeline runs detached on the compute node; this job only starts it.
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # every Monday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for manual run (optional)"
+        required: false
+        default: "manual trigger"
+      force_rerun:
+        description: "Force re-run even if a run is already active"
+        type: boolean
+        default: false
+
+# ── Permissions ───────────────────────────────────────────────────────────────
+permissions:
+  contents: read
+
+# ── Secrets required ──────────────────────────────────────────────────────────
+# SSH_PRIVATE_KEY  private half of the SSH key pair
+# REMOTE_HOST      server hostname or IP
+# REMOTE_USER      Linux user on the server
+# REMOTE_WORKDIR   absolute path to the repo on the server
+
+jobs:
+  launch:
+    name: "Fire Snakemake on server"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5    # this job should complete in seconds
+
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.REMOTE_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          printf 'Host *\n  ServerAliveInterval 60\n  ServerAliveCountMax 10\n' \
+            >> ~/.ssh/config
+
+      - name: Guard against overlapping runs
+        if: ${{ !inputs.force_rerun }}
+        run: |
+          # If a Snakemake lock file exists the previous run is still active.
+          # Exit cleanly (not a failure) to avoid double-running.
+          ACTIVE=$(ssh "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" \
+            "test -f '${{ secrets.REMOTE_WORKDIR }}/.snakemake/lock' && echo yes || echo no")
+          if [ "$ACTIVE" = "yes" ]; then
+            echo "A Snakemake run is already active on the server – skipping launch."
+            exit 0
+          fi
+
+      - name: Pull latest code on server
+        run: |
+          ssh "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" \
+            "git -C '${{ secrets.REMOTE_WORKDIR }}' pull || git clone https://github.com/${{ github.repository }} '${{ secrets.REMOTE_WORKDIR }}' && \
+             cd '${{ secrets.REMOTE_WORKDIR }}' && \
+             python3 -m venv .venv && \
+             . .venv/bin/activate && \
+             grep -v '^r::' requirements.txt | python3 -m pip install -q -r /dev/stdin && \
+             mkdir -p logs && \
+             Rscript -e '
+               pkgs <- readLines(\"requirements.txt\")
+               pkgs <- pkgs[startsWith(pkgs, \"r::\")]
+               pkgs <- sub(\"^r::\", \"\", pkgs)
+               pkgs <- sub(\";$\", \"\", pkgs)
+               pkgs <- trimws(pkgs)
+               missing <- pkgs[!pkgs %in% installed.packages()[,\"Package\"]]
+               if (length(missing)) {
+                 cat(\"Installing R packages:\", paste(missing, collapse=\", \"), \"\\n\")
+                 install.packages(missing, repos=\"https://cloud.r-project.org\", quiet=TRUE)
+               } else {
+                 cat(\"All R packages already installed\\n\")
+               }
+             '"
+
+      - name: Remove stale sentinel (if any)
+        run: |
+          ssh "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" \
+            "rm -f '${{ secrets.REMOTE_WORKDIR }}/output/.run_complete'"
+
+      - name: Fire Snakemake (detached)
+        run: |
+          # nohup + & + redirected I/O ensures the process outlives the SSH session.
+          # --resources ebi_conns=4 caps concurrent EBI download jobs to 4.
+          # Adjust this value if the server handles more (or fewer) connections.
+          RUN_DATE=$(date -u +%Y-%m-%d)
+          ssh "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" \
+            "cd '${{ secrets.REMOTE_WORKDIR }}' && \
+             mkdir -p logs && \
+             nohup snakemake \
+               --profile workflow/profiles/local \
+               --snakefile workflow/Snakefile \
+               --resources ebi_conns=4 \
+               --restart-times 3 \
+               > logs/snakemake_${RUN_DATE}.log 2>&1 &
+             echo \"Snakemake PID \$! launched — run log: logs/snakemake_${RUN_DATE}.log\""

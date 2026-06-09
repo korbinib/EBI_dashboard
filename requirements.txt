@@ -1,0 +1,27 @@
+# requirements.txt
+# Dependencies for the compute node.
+# The launch.yml workflow installs from this file on every run (idempotent).
+
+# ── Python ────────────────────────────────────────────────────────────────────
+requests
+tenacity
+pandas
+snakemake
+
+# ── R (installed via Rscript) ─────────────────────────────────────────────────
+# Format:  r::<package>
+# The launch workflow parses these and installs any that are missing.
+r::tidyverse
+r::jsonlite
+r::lubridate
+r::stringdist
+r::RColorBrewer
+r::scales
+r::ggtext
+r::patchwork
+r::glue
+r::here
+r::DT
+r::shiny
+r::shinythemes
+r::shinylive

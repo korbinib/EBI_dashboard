@@ -1,0 +1,25 @@
+# workflow/config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Tunables for the EBI Norway Dashboard Snakemake workflow.
+# Edit here; do not hard-code values in the Snakefile.
+
+# Incremental fetch settings
+# --------------------------
+# Years older than (current_year - refetch_years) are treated as immutable:
+# their partition files on disk are reused without re-downloading.
+# The last `refetch_years` calendar years are always re-fetched.
+refetch_years: 2
+
+# Earliest year of SRA submissions to include in partitioned fetches.
+partition_start_year: 2007
+
+# EBI API politeness
+rate_sleep: 0.4        # seconds between paginated requests
+page_size: 500         # entries per API request (max allowed by EBI)
+
+# Paths (relative to the repo root)
+data_dir:       data
+raw_dir:        data/raw
+processed_dir:  data/processed
+output_dir:     output
+log_dir:        logs
