@@ -208,7 +208,7 @@ ui <- fluidPage(
 
       sliderInput(
         "top_n_inst", "Top N institutions",
-        min = 3, max = 30, value = 8L, step = 1
+        min = 3, max = 30, value = 10L, step = 1
       ),
 
       sliderInput(

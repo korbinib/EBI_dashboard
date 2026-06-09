@@ -125,16 +125,24 @@ Rscript R/plot_norwegian_data.R
 
 ### 3. Launch Shiny app
 
-The interactive dashboard is `shiny/app.R`. It reads the
-`output/norwegian_entries.csv` produced in step 2 (copied to `shiny/data/`
-at export time), so run the render step first.
+Two ways to run the interactive dashboard:
+
+**A. Quick / debugging** — loads directly from the raw JSON files, so changes to
+parsing or institution normalisation are reflected immediately on reload:
+
+```bash
+SHINY=1 Rscript R/plot_norwegian_data.R
+```
+
+**B. Production / shinylive** — reads the pre-built CSV, identical to what is
+deployed via shinylive. Run the render step first:
 
 ```bash
 cp output/norwegian_entries.csv shiny/data/norwegian_entries.csv
 Rscript -e 'shiny::runApp("shiny")'
 ```
 
-The Shiny app allows interactive selection of:
+Both apps expose the same controls:
 - Time granularity (year / quarter / month)
 - Year range (default: last 10 years)
 - Top N institutions (default: 8), with per-institution checkboxes
