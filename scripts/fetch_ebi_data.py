@@ -2,63 +2,62 @@
 """
 fetch_ebi_data.py
 =================
-Queries the EBI Search REST API for all configured domains and saves
-confirmed Norwegian entries to data/raw/<domain>/.
+Domain configuration and fetch/cache logic for the EBI Norway Dashboard.
+
+Responsibilities
+----------------
+* DOMAINS         – the authoritative domain config (single source of truth;
+                    imported by the Snakefile and fetch_one_domain.py).
+* fetch_domain    – paginate a domain, routing large partitionable domains to
+                    the incremental year/quarter/month fetch.
+* incremental cache – per-window partition files + manifest with sha256 checks.
+* save_domain     – write data/raw/<domain>/latest.json (+ dated copy).
+* fetch_and_save_domain – per-domain orchestration used by both the CLI
+                    (fetch_one_domain.py) and the local in-process run below.
+
+The low-level HTTP client lives in ebi_api.py and the Norwegian filter in
+norwegian_filter.py, so this module is free of those concerns.
 
 Strategy
 --------
-1. DISCOVER  – For each domain call GET /ws/rest/{domain} to retrieve the
-               complete list of retrievable field IDs.
-
-2. FETCH     – Send *:* (catch-all) with all retrievable fields requested.
-               Large SRA domains (>1M entries) are split into year/quarter/month
-               date-range windows.
-
-3. INCREMENTAL CACHE – Only the last 2 calendar years are re-fetched on each
-               run.  Windows for year ≤ (current_year - 2) are immutable: once
-               a partition file exists on disk it is loaded from disk and never
-               re-downloaded.  This applies to all domains that have a
-               partition_date_field.
-
-               Manifest files (data/raw/<domain>/manifest.json) record the
-               sha256 of each immutable partition so corruption is detected
-               and the affected window is re-fetched.
-
-4. FILTER    – Concatenate every field value into a text blob and test against:
-                 a) Geographic indicators  (Norway, Oslo, Bergen, Tromsø, \\bNO\\b …)
-                 b) Institution regexes    (NTNU, Folkehelseinstituttet, …)
-                 c) Norwegian TLD email    (@*.no)
-               sra-study is saved unfiltered (730 K entries, filter deferred to
-               join_ena.py so studies detectable only via joined experiment/sample
-               signals are not lost).  sra-experiment and sra-sample are pre-
-               filtered at page level — fetching 39–53 M rows unfiltered exceeds
-               available RAM.
-
-5. SAVE      – Write entries to data/raw/<domain>/latest.json (and a dated copy).
+1. DISCOVER  – ebi_api.get_retrievable_fields() lists retrievable field IDs.
+2. FETCH     – *:* with all fields.  Domains with a partition_date_field that
+               report ≥1M entries are split into year/quarter/month windows.
+3. CACHE     – Only the last REFETCH_YEARS calendar years are re-fetched; older
+               windows are served from sha256-verified partition files on disk.
+4. FILTER    – sra-study is saved unfiltered (filter deferred to join_ena.py).
+               sra-experiment and sra-sample are pre-filtered at page level
+               (39–53 M rows unfiltered would exceed RAM).  Non-SRA domains are
+               filtered at page level too.
+5. SAVE      – data/raw/<domain>/latest.json (+ dated copy).
 
 Output
 ------
-  data/domains.json                      – domain config snapshot
-  data/raw/<domain>/latest.json          – filtered entries for this run
-  data/raw/<domain>/manifest.json        – incremental-cache manifest
+  data/domains.json                       – domain config snapshot
+  data/raw/<domain>/latest.json           – entries for this run
+  data/raw/<domain>/manifest.json         – incremental-cache manifest
   data/raw/<domain>/partitions/<key>.json – per-window checkpoint files
 """
 
 import hashlib
 import json
 import os
-import re
-import time
+import sys
 import logging
 from datetime import date
 from pathlib import Path
 
-try:
-    import requests
-    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-    _REQUESTS_AVAILABLE = True
-except ImportError:
-    _REQUESTS_AVAILABLE = False
+from paths import RAW_DIR, DOMAINS_JSON
+from ebi_api import (
+    BASE_URL, PAGE_SIZE, RATE_SLEEP, CATCH_ALL_QUERY,
+    get_json, get_retrievable_fields, get_hit_count,
+)
+from norwegian_filter import (
+    load_geo_tokens, load_institution_regexes, build_geo_regex,
+    is_norwegian_entry,
+)
+import time
+import re
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -75,18 +74,14 @@ log = logging.getLogger("fetch_ebi")
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
-BASE_URL   = "https://www.ebi.ac.uk/ebisearch/ws/rest"
-PAGE_SIZE  = 500
-RATE_SLEEP = 0.4
-TODAY      = date.today().isoformat()
+TODAY = date.today().isoformat()
 
-CATCH_ALL_QUERY     = "*:*"
 # Hard pagination cap of the EBI Search API: it never returns more than this
 # many entries for a single query, and it also CAPS the reported hitCount at
 # this value.  A domain/window reporting exactly MAX_PAGEABLE may therefore hold
 # far more — so any count that reaches the cap must be split into smaller
 # (year → quarter → month) windows rather than paginated directly.
-MAX_PAGEABLE        = 1_000_000
+MAX_PAGEABLE         = 1_000_000
 PARTITION_START_YEAR = 2007
 
 # Number of trailing calendar years that are always re-fetched on every run.
@@ -104,77 +99,8 @@ REFETCH_YEARS = 2
 #
 # FILTER_VERSION must be bumped whenever the filtering strategy changes so that
 # fetch_domain_partitioned() invalidates old unfiltered partition files.
-SRA_DOMAINS     = frozenset({"sra-study"})
-FILTER_VERSION  = 2
-
-FALLBACK_FIELDS = ["name", "title", "description"]
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Norwegian filter helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-def load_geo_tokens(path: str = "data/institution_map.json") -> list[str]:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except FileNotFoundError:
-        log.warning("Institution map not found: %s – using fallback geo tokens", path)
-        return ["Norway", "Norge", "Norwegian", "Norsk", "Oslo", "Bergen",
-                "Trondheim", "Tromsø", "Stavanger"]
-    result: list[str] = []
-    for t in data.get("norway_indicators", []):
-        t = t.strip()
-        if not t or any(c in t for c in r"\()[]{}?*+^$|") or len(t) <= 2:
-            continue
-        result.append(t)
-    return sorted(set(result))
-
-
-def load_institution_regexes(path: str = "data/institution_map.json") -> list[re.Pattern]:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except FileNotFoundError:
-        log.warning("Institution map not found: %s – institution filter disabled", path)
-        return []
-    compiled: list[re.Pattern] = []
-    for inst in data.get("institutions", []):
-        for p in inst.get("patterns", []):
-            try:
-                compiled.append(re.compile(p, re.IGNORECASE))
-            except re.error as exc:
-                log.debug("Skipping invalid pattern %r: %s", p, exc)
-    log.info("Loaded %d institution regex patterns", len(compiled))
-    return compiled
-
-
-def build_geo_regex(geo_tokens: list[str]) -> re.Pattern:
-    parts = [re.escape(t) for t in geo_tokens] + [r"\bNO\b"]
-    return re.compile("|".join(parts), re.IGNORECASE)
-
-
-_EMAIL_NO_RE = re.compile(r"@[\w.\-]+\.no\b", re.IGNORECASE)
-
-
-def is_norwegian_entry(entry: dict, geo_re: re.Pattern,
-                       inst_regexes: list[re.Pattern]) -> bool:
-    fields = entry.get("fields", {})
-    parts: list[str] = []
-    for vals in fields.values():
-        if isinstance(vals, list):
-            parts.extend(str(v) for v in vals if v is not None and str(v).strip())
-        elif vals is not None and str(vals).strip():
-            parts.append(str(vals))
-    combined = " ".join(parts)
-    if not combined.strip():
-        return False
-    if geo_re.search(combined):
-        return True
-    for pat in inst_regexes:
-        if pat.search(combined):
-            return True
-    return bool(_EMAIL_NO_RE.search(combined))
+SRA_DOMAINS    = frozenset({"sra-study"})
+FILTER_VERSION = 2
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -259,10 +185,7 @@ DOMAINS: dict[str, dict] = {
             "region", "sample_capture_status", "scientific_name", "strain",
             "submission_tool", "tag",
         ],
-        # country:Norway filters at query time: ~150K entries vs 53M total.
-        # This keeps the result well below MAX_PAGEABLE so no year-partitioning
-        # is needed and no page-level regex filter is required.
-        "query": "country:Norway",
+        "partition_date_field": "first_public_date",
         "join_key": "sample_accession",
     },
     "sra-experiment": {
@@ -274,67 +197,11 @@ DOMAINS: dict[str, dict] = {
             "library_name", "library_selection", "library_source",
             "library_strategy", "region", "scientific_name", "strain",
             "sub_species", "tag",
-            # XREF fields: these are the actual join keys in the EBI Search API.
-            # study_accession and sample_accession are never populated; the
-            # cross-domain links live here instead.
-            "SRA-STUDY",   # ERP/SRP study accession → sra-study.id
-            "SAMPLE",      # SAMEA/SAMN BioSample accession → sra-sample.id/acc
-            "SRA-SAMPLE",  # ERS accession → sra-sample.id (ENA-native fallback)
         ],
         "partition_date_field": "first_public_date",
-        "join_key": "SRA-STUDY",
+        "join_key": "study_accession",
     },
 }
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# HTTP helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-if _REQUESTS_AVAILABLE:
-    SESSION = requests.Session()
-    SESSION.headers.update({"Accept": "application/json"})
-
-    @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type(requests.RequestException),
-        reraise=True,
-    )
-    def get_json(url: str, params: dict) -> dict:
-        resp = SESSION.get(url, params=params, timeout=60)
-        resp.raise_for_status()
-        return resp.json()
-else:
-    def get_json(url: str, params: dict) -> dict:  # type: ignore[misc]
-        raise RuntimeError(
-            "requests/tenacity not installed – cannot make HTTP requests. "
-            "Run: pip install requests tenacity"
-        )
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Field discovery
-# ──────────────────────────────────────────────────────────────────────────────
-
-def get_retrievable_fields(domain: str, cfg: dict) -> list[str]:
-    required: list[str] = cfg.get("required_fields", FALLBACK_FIELDS)
-    url = f"{BASE_URL}/{domain}"
-    try:
-        data = get_json(url, {"format": "json"})
-        discovered = [
-            f["id"]
-            for f in data.get("fieldInfos", [])
-            if f.get("retrievable", False)
-        ]
-        merged = list(dict.fromkeys(required + discovered))
-        log.info("  %s: %d required + %d discovered = %d total fields",
-                 domain, len(required), len(discovered), len(merged))
-        return merged
-    except Exception as exc:
-        log.warning("  %s: metadata fetch failed (%s) – using required fields only",
-                    domain, exc)
-        return required
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -342,7 +209,7 @@ def get_retrievable_fields(domain: str, cfg: dict) -> list[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _manifest_path(domain: str) -> Path:
-    return Path("data/raw") / domain / "manifest.json"
+    return RAW_DIR / domain / "manifest.json"
 
 
 def _load_manifest(domain: str) -> dict:
@@ -375,7 +242,7 @@ def _sha256_file(path: Path) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _partition_dir(domain: str) -> Path:
-    return Path("data/raw") / domain / "partitions"
+    return RAW_DIR / domain / "partitions"
 
 
 def _partition_path(domain: str, key: str) -> Path:
@@ -449,22 +316,6 @@ def _save_partition(domain: str, key: str, entries: list[dict],
         "sha256":     _sha256_file(path),
         "fetch_date": TODAY,
     }
-
-
-def _get_hit_count(domain: str, fields: list[str], query: str) -> int:
-    url = f"{BASE_URL}/{domain}"
-    try:
-        data = get_json(url, {
-            "query":  query,
-            "fields": fields[0] if fields else "id",
-            "format": "json",
-            "size":   1,
-            "start":  0,
-        })
-        return int(data.get("hitCount", 0))
-    except Exception as exc:
-        log.warning("  hit-count probe failed for %s (%s)", domain, exc)
-        return 0
 
 
 def _fetch_window(domain: str, fields: list[str], query: str,
@@ -595,7 +446,7 @@ def fetch_domain_partitioned(domain: str, cfg: dict, fields: list[str],
 
         d_start, d_end = _date_range(year, month, quarter)
         window_query   = f"{date_field}:[{d_start} TO {d_end}]"
-        count = _get_hit_count(domain, fields, window_query)
+        count = get_hit_count(domain, fields, window_query)
         log.info("%s%s  %s–%s  %d entries", indent, domain, d_start, d_end, count)
 
         if count == 0:
@@ -667,18 +518,11 @@ def fetch_domain(domain: str, cfg: dict, fields: list[str],
 
     Domains with partition_date_field are routed to fetch_domain_partitioned()
     which implements both the year/quarter/month window splitting and the
-    incremental cache.  Small domains (or domains with a narrow query) use
-    standard single-pass pagination.
-
-    If cfg["query"] is set it replaces the default catch-all (*:*) at the API
-    level, pre-filtering results before any page-level Norwegian regex runs.
+    incremental cache.  Small domains use standard single-pass pagination.
     """
-    domain_query = cfg.get("query", CATCH_ALL_QUERY)
-
     if cfg.get("partition_date_field"):
-        hit_count = _get_hit_count(domain, fields, domain_query)
-        log.info("  %s → %d entries for query %r", domain, hit_count,
-                 domain_query if domain_query != CATCH_ALL_QUERY else "*:*")
+        hit_count = get_hit_count(domain, fields, CATCH_ALL_QUERY)
+        log.info("  %s → %d total entries in domain", domain, hit_count)
         # >= (not >): the API caps hitCount at MAX_PAGEABLE, so a domain reporting
         # exactly the cap may actually hold many more and must be partitioned.
         if hit_count >= MAX_PAGEABLE:
@@ -686,10 +530,10 @@ def fetch_domain(domain: str, cfg: dict, fields: list[str],
                      domain)
             return fetch_domain_partitioned(domain, cfg, fields, geo_re, inst_regexes)
 
-    # Standard single-pass pagination
+    # Standard single-pass pagination for small domains
     url    = f"{BASE_URL}/{domain}"
     params = {
-        "query":  domain_query,
+        "query":  CATCH_ALL_QUERY,
         "fields": ",".join(fields),
         "format": "json",
         "size":   PAGE_SIZE,
@@ -742,7 +586,7 @@ def fetch_domain(domain: str, cfg: dict, fields: list[str],
 
 def save_domain(domain: str, entries: list[dict], fields: list[str]) -> Path:
     """Write entries to data/raw/<domain>/latest.json (and a dated copy)."""
-    raw_dir = Path("data/raw") / domain
+    raw_dir = RAW_DIR / domain
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     payload = {
@@ -764,7 +608,7 @@ def save_domain(domain: str, entries: list[dict], fields: list[str]) -> Path:
     return dated_path
 
 
-def save_domains_json(path: str = "data/domains.json") -> None:
+def save_domains_json(path: Path = DOMAINS_JSON) -> None:
     """Write DOMAINS config to data/domains.json for external consumers."""
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -784,33 +628,72 @@ def save_domains_json(path: str = "data/domains.json") -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Main  –  sequential local orchestrator
+# Per-domain orchestration  (single source of truth for one domain's fetch)
 # ──────────────────────────────────────────────────────────────────────────────
 
-import subprocess
-import sys
+def fetch_and_save_domain(domain: str,
+                          geo_re: re.Pattern | None = None,
+                          inst_regexes: list[re.Pattern] | None = None) -> int:
+    """
+    Fetch + filter + save a single domain.  Used by fetch_one_domain.py (one
+    domain per Snakemake job) and by main()'s local in-process loop.
 
+    The Norwegian filter is built on demand; callers running many domains can
+    pass a prebuilt geo_re / inst_regexes to avoid recompiling per domain.
+    Returns the number of entries saved.
+    """
+    cfg = DOMAINS[domain]
+
+    if geo_re is None or inst_regexes is None:
+        geo_tokens   = load_geo_tokens()
+        inst_regexes = load_institution_regexes()
+        geo_re       = build_geo_regex(geo_tokens)
+        log.info("Filter ready: %d geo tokens, %d institution patterns",
+                 len(geo_tokens), len(inst_regexes))
+
+    log.info("=== fetch_and_save_domain: %s ===", domain)
+    fields  = get_retrievable_fields(domain, cfg)
+    entries = fetch_domain(domain, cfg, fields, geo_re, inst_regexes)
+    save_domain(domain, entries, fields)
+
+    # Partition checkpoint summary (files are retained so a re-run resumes)
+    part_dir = _partition_dir(domain)
+    if part_dir.exists():
+        part_files = sorted(part_dir.glob("*.json"))
+        log.info("  Partitions: %d checkpoint files retained in %s",
+                 len(part_files), part_dir)
+
+    log.info("=== Done: %s (%d entries) ===", domain, len(entries))
+    return len(entries)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main  –  sequential local orchestrator (Snakemake is the production driver)
+# ──────────────────────────────────────────────────────────────────────────────
 
 def main():
     if len(sys.argv) == 2 and sys.argv[1] == "--list-domains":
         save_domains_json()
-        data = json.loads(Path("data/domains.json").read_text())
-        print(json.dumps(list(data["domains"].keys())))
+        print(json.dumps(list(DOMAINS.keys())))
         return
 
     log.info("Starting EBI fetch (sequential / local)  date=%s", TODAY)
     save_domains_json()
 
-    scripts_dir = Path(__file__).resolve().parent
-    fetch_one   = scripts_dir / "fetch_one_domain.py"
+    # Build the Norwegian filter once and reuse it across all domains.
+    geo_tokens   = load_geo_tokens()
+    inst_regexes = load_institution_regexes()
+    geo_re       = build_geo_regex(geo_tokens)
+    log.info("Filter ready: %d geo tokens, %d institution patterns",
+             len(geo_tokens), len(inst_regexes))
 
     failed: list[str] = []
     for domain in DOMAINS:
         log.info("─── Domain: %s ───", domain)
-        result = subprocess.run([sys.executable, str(fetch_one), domain], check=False)
-        if result.returncode != 0:
-            log.error("fetch_one_domain.py failed for %s (exit %d)",
-                      domain, result.returncode)
+        try:
+            fetch_and_save_domain(domain, geo_re, inst_regexes)
+        except Exception as exc:
+            log.error("fetch_and_save_domain failed for %s: %s", domain, exc)
             failed.append(domain)
 
     if failed:
@@ -818,16 +701,15 @@ def main():
     else:
         log.info("All domains fetched ✓")
 
-    join_ena = scripts_dir / "join_ena.py"
-    if join_ena.exists():
-        log.info("─── Running join_ena.py ───")
-        result = subprocess.run([sys.executable, str(join_ena)], check=False)
-        if result.returncode != 0:
-            log.error("join_ena.py failed (exit %d)", result.returncode)
-        else:
-            log.info("join_ena.py ✓")
+    # Run the SRA join in-process (no subprocess indirection).
+    log.info("─── Running join_ena ───")
+    try:
+        import join_ena
+        join_ena.main()
+        log.info("join_ena ✓")
+    except Exception as exc:
+        log.error("join_ena failed: %s", exc)
 
 
 if __name__ == "__main__":
-    os.chdir(Path(__file__).parent.parent)
     main()

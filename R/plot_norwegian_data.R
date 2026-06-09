@@ -3,11 +3,15 @@
 # plot_norwegian_data.R
 # =============================================================================
 # Reads all EBI Search raw JSON files (and the joined ENA file), filters for
-# Norwegian entries, normalises institution names, and produces ggplot2 bar
-# charts saved under output/.
+# Norwegian entries, normalises institution names, and produces static ggplot2
+# bar charts + norwegian_entries.csv under output/.
 #
-# The script is also structured to run as a Shiny app – set SHINY=TRUE via
-# environment variable or call it directly with `shiny::runApp("R/")`.
+# The interactive dashboard is a SEPARATE app: shiny/app.R (run with
+# `Rscript -e 'shiny::runApp("shiny")'`).  It reads the CSV this script writes.
+#
+# NOTE: the plot style (make_inst_palette, theme_nor, the grouped/dodged geom)
+# is intentionally duplicated in shiny/app.R — that file must stay self-contained
+# for the WebR/shinylive export.  Keep the two copies in sync.
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -28,7 +32,28 @@ suppressPackageStartupMessages({
   library(glue)
 })
 
-RUN_AS_SHINY <- nzchar(Sys.getenv("SHINY"))  # set env var SHINY=1 to run app
+# Null-coalescing operator: fall back to `b` only when `a` is NULL or empty.
+# (Pure container-safe coalesce — does NOT inspect a[[1]], so passing a list of
+# fields whose first element happens to be empty returns the list unchanged.)
+`%||%` <- function(a, b) {
+  if (is.null(a) || length(a) == 0) return(b)
+  a
+}
+
+#' Return the first present, non-empty, non-NA field value from `fields`,
+#' trying `keys` in priority order; `default` if none match.
+#' Used where several field names may carry the same information (e.g. a title
+#' that may live in name / title / abstract depending on the domain).
+pick_field <- function(fields, keys, default = NA_character_) {
+  for (k in keys) {
+    v <- fields[[k]]
+    if (!is.null(v) && length(v) > 0) {
+      v1 <- as.character(v[[1]])
+      if (!is.na(v1) && nzchar(v1)) return(v1)
+    }
+  }
+  default
+}
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 if (requireNamespace("here", quietly = TRUE)) {
@@ -84,6 +109,18 @@ build_pattern_df <- function(inst_list) {
 PATTERN_DF <- build_pattern_df(inst_map$institutions)
 NORWAY_RE  <- paste(inst_map$norway_indicators, collapse = "|")
 
+# Email-domain → canonical lookup built once from web_domain fields.
+# Keys are base domains (e.g. "uio.no"); matching also handles sub-domains.
+DOMAIN_LU <- local({
+  cans <- sapply(inst_map$institutions, `[[`, "canonical")
+  doms <- sapply(inst_map$institutions, function(i) {
+    d <- i[["web_domain"]]
+    if (is.null(d) || is.na(d) || !nzchar(d)) NA_character_ else tolower(trimws(d))
+  })
+  mask <- !is.na(doms)
+  setNames(cans[mask], doms[mask])
+})
+
 #' Robust EBI date parser.
 #' Handles: "20230115" (YYYYMMDD compact, most EBI fields),
 #'          "2023-01-15", "2023-01-15T00:00:00Z", "2023-01",
@@ -106,40 +143,52 @@ parse_ebi_date <- function(x) {
   d
 }
 
-#' Normalise a free-text affiliation string to a canonical institution name.
-#' Returns the canonical name, or "Other Norway" if no match.
-normalise_institution <- function(affil_vec) {
-  if (is.null(affil_vec) || length(affil_vec) == 0) return("Other Norway")
-  affil <- paste(affil_vec, collapse = " ")
-  if (is.na(affil) || affil == "") return("Other Norway")
+#' Normalise affiliation + email signals to a canonical institution name.
+#'
+#' Matching priority:
+#'   1. Email domain lookup  (@uio.no → "University of Oslo", decisive signal)
+#'   2. Regex pattern matching on combined affiliation text
+#'   3. Per-token Jaro-Winkler against abbreviations (catches "UiO"/"NTNU" in noisy strings)
+#'   4. Full-string Jaro-Winkler against canonical names (informal long-form names)
+#'
+#' Returns the canonical institution name, or "Other Norway" if nothing matches.
+normalise_institution <- function(affil_vec, email_vec = character(0)) {
 
+  # 1. Email domain lookup — highest confidence, very few false positives.
+  valid_emails <- email_vec[!is.na(email_vec) & nzchar(email_vec)]
+  for (em in valid_emails) {
+    dom <- tolower(sub(".*@", "", trimws(em)))
+    for (d in names(DOMAIN_LU)) {
+      if (dom == d || endsWith(dom, paste0(".", d))) return(DOMAIN_LU[[d]])
+    }
+  }
+
+  # 2. Regex pattern matching on affiliation text.
+  affil <- paste(affil_vec[!is.na(affil_vec)], collapse = " ")
+  if (!nzchar(trimws(affil))) return("Other Norway")
   for (i in seq_len(nrow(PATTERN_DF))) {
     if (grepl(PATTERN_DF$pattern[i], affil, ignore.case = TRUE, perl = TRUE)) {
       return(PATTERN_DF$canonical[i])
     }
   }
 
-  # Fuzzy fallback: compare against all canonical names (+ Norwegian names)
-  all_canonical  <- sapply(inst_map$institutions, `[[`, "canonical")
-  all_canonical_no <- sapply(inst_map$institutions, `[[`, "canonical_no")
-  all_abbrevs    <- sapply(inst_map$institutions, `[[`, "abbrev")
+  # 3 & 4. Fuzzy fallback.
+  all_canonical <- sapply(inst_map$institutions, `[[`, "canonical")
+  all_abbrevs   <- sapply(inst_map$institutions, `[[`, "abbrev")
 
-  # Tokenise affil into words and try each against canonicals
+  # 3. Per-token JW against abbreviations (abbreviation-length tokens only).
   tokens <- unlist(strsplit(affil, "[,;/()\\s]+"))
-  tokens <- tokens[nchar(tokens) > 3]
-
+  tokens <- tokens[nchar(tokens) >= 2L & nchar(tokens) <= 8L]
   for (tok in tokens) {
-    distances <- stringdist(tolower(tok), tolower(all_abbrevs), method = "jw")
-    best_abbrev <- which.min(distances)
-    if (distances[best_abbrev] < 0.12) {
-      return(all_canonical[best_abbrev])
-    }
-    distances2 <- stringdist(tolower(affil), tolower(all_canonical), method = "jw")
-    best2 <- which.min(distances2)
-    if (distances2[best2] < 0.18) {
-      return(all_canonical[best2])
-    }
+    dist_abbr <- stringdist(tolower(tok), tolower(all_abbrevs), method = "jw")
+    best <- which.min(dist_abbr)
+    if (dist_abbr[best] < 0.15) return(all_canonical[best])
   }
+
+  # 4. Full-string JW against canonical names (run once, outside the token loop).
+  dist_full <- stringdist(tolower(affil), tolower(all_canonical), method = "jw")
+  best_full <- which.min(dist_full)
+  if (dist_full[best_full] < 0.22) return(all_canonical[best_full])
 
   "Other Norway"
 }
@@ -206,8 +255,7 @@ parse_entry <- function(entry, domain) {
   tibble(
     domain      = domain,
     accession   = entry$id %||% NA_character_,
-    title       = (fields[["name"]] %||% fields[["title"]] %||%
-                   fields[["abstract"]] %||% list(NA_character_))[[1]],
+    title       = pick_field(fields, c("name", "title", "abstract")),
     affiliation = paste(affil_vals, collapse = " | "),
     country     = paste(country_vals, collapse = " | "),
     email       = if (length(email_vals) > 0) email_vals[[1]] else NA_character_,
@@ -215,10 +263,10 @@ parse_entry <- function(entry, domain) {
     year        = year(parsed_date),
     quarter     = quarter(parsed_date),
     month       = month(parsed_date),
-    institution = as.character(normalise_institution(affil_vals))[1L]
+    institution = as.character(normalise_institution(affil_vals, email_vec = email_vals))[1L]
   )
 }
- 
+
 load_standard_domain <- function(domain) {
   path <- file.path(RAW_DIR, domain, "latest.json")
   if (!file.exists(path)) {
@@ -465,9 +513,14 @@ plot_time_by_domain <- function(df,
     distinct(time_val, time_label) %>%
     arrange(time_val)
  
+  # Grouped (dodged) bars — one bar per institution per time unit, not stacked.
+  # Kept in sync with shiny/app.R (see header note).
   ggplot(counts, aes(x = time_val, y = n, fill = institution)) +
-    geom_col(width = if (granularity == "year") 0.7 else
-                     if (granularity == "quarter") 0.22 else 0.07) +
+    geom_col(
+      position = position_dodge2(padding = 0.1, preserve = "single"),
+      width    = if (granularity == "year") 0.8 else
+                 if (granularity == "quarter") 0.22 else 0.07
+    ) +
     facet_wrap(~domain_label, scales = "free_y", ncol = 2) +
     scale_fill_manual(values = pal, name = "Institution") +
     scale_x_continuous(
@@ -479,7 +532,7 @@ plot_time_by_domain <- function(df,
     labs(
       title    = "**Norwegian submissions to EBI repositories**",
       subtitle = glue(
-        "Coloured by institution · faceted by repository · granularity: {granularity}"
+        "Grouped by institution · faceted by repository · granularity: {granularity}"
       ),
       x = NULL, y = "Number of entries"
     ) +
@@ -514,51 +567,81 @@ save_plots <- function(df) {
  
  
 # =============================================================================
-# 5.  Shiny app wrapper
+# 5.  Interactive Shiny app (local debugging)
 # =============================================================================
- 
+# Loads data live from JSON files via load_all_data() — exercises the full
+# parse/normalise pipeline, useful for debugging date parsing, institution
+# matching, filter gaps, etc.  Unlike shiny/app.R (which reads the pre-built
+# CSV), changes to parse_entry() / normalise_institution() are reflected
+# immediately on reload.
+#
+# Launch:
+#   SHINY=1 Rscript R/plot_norwegian_data.R
+#   Rscript -e 'source("R/plot_norwegian_data.R"); shiny_app(load_all_data())'
+
 shiny_app <- function(df) {
-  require(shiny)
-  require(shinythemes)
-  require(DT)
- 
-  domain_choices <- sort(unique(df$domain_label))
-  year_range     <- range(df$year, na.rm = TRUE)
- 
+  for (pkg in c("shiny", "shinythemes", "DT")) {
+    if (!requireNamespace(pkg, quietly = TRUE))
+      stop("Package '", pkg, "' is required to run the interactive app: ",
+           "install.packages('", pkg, "')")
+  }
+  library(shiny)
+  library(shinythemes)
+  library(DT)
+
+  domain_choices  <- sort(unique(df$domain_label))
+  year_range_data <- range(df$year, na.rm = TRUE)
+  latest_date     <- max(df$date, na.rm = TRUE)
+
   ui <- fluidPage(
     theme = shinytheme("flatly"),
-    titlePanel("Norwegian EBI Submissions Dashboard"),
+    titlePanel("Norwegian EBI Submissions (live data)"),
+
     sidebarLayout(
       sidebarPanel(
         width = 3,
- 
-        selectInput("granularity", "Time granularity",
-                    choices  = c("Year" = "year", "Quarter" = "quarter", "Month" = "month"),
-                    selected = "year"),
- 
-        sliderInput("top_n_inst", "Top N institutions (rest → Other Norway)",
-                    min = 3, max = 30, value = 12, step = 1),
- 
-        sliderInput("min_year", "From year",
-                    min   = year_range[1],
-                    max   = year_range[2],
-                    value = max(year_range[1], year_range[2] - 10L),
-                    step  = 1L,
-                    sep   = ""),
 
-        sliderInput("min_domain_entries",
-                    "Min entries per repository (hide smaller ones)",
-                    min = 1, max = 100, value = MIN_DOMAIN_ENTRIES, step = 1),
- 
-        checkboxGroupInput("domains", "Repositories",
-                           choices  = domain_choices,
-                           selected = domain_choices),
- 
+        selectInput(
+          "granularity", "Time granularity",
+          choices  = c("Year" = "year", "Quarter" = "quarter", "Month" = "month"),
+          selected = "year"
+        ),
+
+        sliderInput(
+          "year_range", "Year range",
+          min   = year_range_data[1],
+          max   = year_range_data[2],
+          value = c(max(year_range_data[1], year_range_data[2] - 10L),
+                    year_range_data[2]),
+          step  = 1L, sep = ""
+        ),
+
+        sliderInput(
+          "top_n_inst", "Top N institutions",
+          min = 3, max = 30, value = 8L, step = 1
+        ),
+
+        sliderInput(
+          "min_domain_entries", "Min entries per repository",
+          min = 1, max = 100, value = MIN_DOMAIN_ENTRIES, step = 1
+        ),
+
+        checkboxGroupInput(
+          "domains", "Repositories",
+          choices  = domain_choices,
+          selected = domain_choices
+        ),
+
         hr(),
-        p(em(paste("Data fetched:", Sys.Date()))),
-        p(em(paste(nrow(df), "Norwegian entries total")))
+        # Dynamic institution checkboxes: rebuilt when top_n / year / domain
+        # filters change.  All top-N institutions pre-ticked by default.
+        uiOutput("inst_checkbox"),
+
+        hr(),
+        p(em(paste("Latest entry:", format(latest_date, "%Y-%m-%d")))),
+        p(em(paste(nrow(df), "Norwegian entries loaded from JSON")))
       ),
- 
+
       mainPanel(
         width = 9,
         plotOutput("main_plot", height = "700px"),
@@ -567,68 +650,103 @@ shiny_app <- function(df) {
       )
     )
   )
- 
+
   server <- function(input, output, session) {
+
+    # Filtered base (year + domain); institution lumping applied on top.
+    base_df <- reactive({
+      req(input$year_range, input$domains)
+      df |>
+        filter(domain_label %in% input$domains,
+               !is.na(year),
+               year >= input$year_range[1],
+               year <= input$year_range[2])
+    })
+
+    # Top-N institutions in the current year+domain window.
+    # "Other Norway" appended so the user can always toggle it.
+    top_institutions <- reactive({
+      req(input$top_n_inst)
+      top_inst <- base_df() |>
+        count(institution, sort = TRUE) |>
+        slice_head(n = input$top_n_inst) |>
+        pull(institution)
+      unique(c(top_inst, "Other Norway"))
+    })
+
+    output$inst_checkbox <- renderUI({
+      inst <- top_institutions()
+      checkboxGroupInput("selected_inst", "Show institutions",
+                         choices = inst, selected = inst)
+    })
+
     output$main_plot <- renderPlot({
+      req(input$year_range, input$top_n_inst)
+
+      # Lump institutions to top-N, then apply checkbox filter.
+      # plot_time_by_domain is called with a high top_n_inst cap so it does not
+      # re-lump the already-collapsed institution column.
+      top_inst <- setdiff(top_institutions(), "Other Norway")
+      d <- base_df() |>
+        mutate(institution = if_else(institution %in% top_inst,
+                                     institution, "Other Norway"))
+
+      if (!is.null(input$selected_inst) && length(input$selected_inst) > 0)
+        d <- d |> filter(institution %in% input$selected_inst)
+
       plot_time_by_domain(
-        df,
+        d,
         granularity        = input$granularity,
-        top_n_inst         = input$top_n_inst,
-        domains            = input$domains,
-        min_year           = input$min_year,
+        top_n_inst         = 999L,   # lumping already done above
         min_domain_entries = input$min_domain_entries
       )
     }, res = 120)
- 
+
     output$entry_table <- DT::renderDataTable({
-      # Respect the same domain threshold in the table
-      keep <- df %>%
-        filter(domain_label %in% input$domains,
-               !is.na(year), year >= input$min_year) %>%
-        count(domain_label, name = "total") %>%
-        filter(total >= input$min_domain_entries) %>%
+      req(input$year_range, input$domains)
+      keep <- base_df() |>
+        count(domain_label, name = "total") |>
+        filter(total >= input$min_domain_entries) |>
         pull(domain_label)
-      df %>%
-        filter(domain_label %in% keep,
-               !is.na(year), year >= input$min_year) %>%
-        select(Repository = domain_label, Accession = accession,
-               Title = title, Date = date, Institution = institution) %>%
+      base_df() |>
+        filter(domain_label %in% keep) |>
+        select(
+          Repository  = domain_label,
+          Accession   = accession,
+          Title       = title,
+          Date        = date,
+          Institution = institution,
+          Affiliation = affiliation,
+          Email       = email
+        ) |>
         arrange(desc(Date))
     }, options = list(pageLength = 10, scrollX = TRUE), filter = "top")
   }
- 
+
   shinyApp(ui, server)
 }
- 
- 
+
+
 # =============================================================================
 # 6.  Entry point
 # =============================================================================
- 
+# Default:   Rscript R/plot_norwegian_data.R          → saves static PNGs + CSV
+# Shiny:     SHINY=1 Rscript R/plot_norwegian_data.R  → launches interactive app
+
 main <- function() {
   df <- load_all_data()
   message(glue("Loaded {nrow(df)} Norwegian entries across {n_distinct(df$domain)} domains"))
- 
+
   if (nrow(df) == 0) {
     message("No data found – have you run fetch_ebi_data.py yet?")
     return(invisible(NULL))
   }
- 
-  if (RUN_AS_SHINY) {
-    require(DT)
+
+  if (identical(Sys.getenv("SHINY"), "1")) {
     shiny_app(df)
   } else {
     save_plots(df)
   }
 }
- 
-# Null-coalescing operator.
-# Safe when a[[1]] is a vector of length > 1 (multi-value API fields).
-`%||%` <- function(a, b) {
-  if (is.null(a) || length(a) == 0) return(b)
-  first <- a[[1]]
-  if (length(first) == 0 || all(is.na(first))) return(b)
-  a
-}
- 
+
 main()

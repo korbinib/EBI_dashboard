@@ -49,14 +49,23 @@ Output
 
 import json
 import logging
-import os
 import re
 import time
+import sys
 from pathlib import Path
 from datetime import date
 from typing import Iterator
 
 import pandas as pd
+
+# Ensure scripts/ is importable regardless of how this file is invoked.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from norwegian_filter import (
+    load_geo_tokens, load_institution_regexes, build_geo_regex,
+    make_combined_filter,
+)
+from paths import RAW_DIR, PROC_DIR
 
 try:
     import requests as _requests
@@ -71,62 +80,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("join_ena")
 
-TODAY    = date.today().isoformat()
-RAW_DIR  = Path("data/raw")
-PROC_DIR = Path("data/processed")
+TODAY = date.today().isoformat()
 PROC_DIR.mkdir(parents=True, exist_ok=True)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Norwegian filter helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-def load_geo_tokens(path: str = "data/institution_map.json") -> list[str]:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except FileNotFoundError:
-        log.warning("Institution map not found: %s – using fallback", path)
-        return ["Norway", "Norge", "Norwegian", "Norsk", "Oslo", "Bergen",
-                "Trondheim", "Tromsø", "Stavanger"]
-    result: list[str] = []
-    for t in data.get("norway_indicators", []):
-        t = t.strip()
-        if not t or any(c in t for c in r"\()[]{}?*+^$|") or len(t) <= 2:
-            continue
-        result.append(t)
-    return sorted(set(result))
-
-
-def load_institution_regexes(path: str = "data/institution_map.json") -> list[re.Pattern]:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except FileNotFoundError:
-        return []
-    compiled: list[re.Pattern] = []
-    for inst in data.get("institutions", []):
-        for p in inst.get("patterns", []):
-            try:
-                compiled.append(re.compile(p, re.IGNORECASE))
-            except re.error:
-                pass
-    return compiled
-
-
-def build_geo_regex(geo_tokens: list[str]) -> re.Pattern:
-    parts = [re.escape(t) for t in geo_tokens] + [r"\bNO\b"]
-    return re.compile("|".join(parts), re.IGNORECASE)
-
-
-_EMAIL_NO_RE = re.compile(r"@[\w.\-]+\.no\b", re.IGNORECASE)
-
-
-def _make_combined_filter(geo_re: re.Pattern,
-                          inst_regexes: list[re.Pattern]) -> re.Pattern:
-    all_patterns = [geo_re.pattern] + [p.pattern for p in inst_regexes] + \
-                   [_EMAIL_NO_RE.pattern]
-    return re.compile("|".join(f"(?:{p})" for p in all_patterns), re.IGNORECASE)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -307,7 +262,7 @@ def main():
     geo_tokens   = load_geo_tokens()
     inst_regexes = load_institution_regexes()
     geo_re       = build_geo_regex(geo_tokens)
-    combined_re  = _make_combined_filter(geo_re, inst_regexes)
+    combined_re  = make_combined_filter(geo_re, inst_regexes)
     log.info("Filter: %d geo tokens, %d institution patterns",
              len(geo_tokens), len(inst_regexes))
 
@@ -435,5 +390,4 @@ def main():
 
 
 if __name__ == "__main__":
-    os.chdir(Path(__file__).parent.parent)
     main()
