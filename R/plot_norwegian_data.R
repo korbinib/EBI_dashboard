@@ -79,11 +79,12 @@ DOMAIN_LABELS <- c(
   "metabolights"     = "MetaboLights",
   "pride"            = "PRIDE",
   "biomodels"        = "BioModels",
-  "ENA"              = "ENA/SRA"
+  "ENA"              = "ENA Studies",
+  "sra-sample"       = "ENA Samples"
 )
 
 # Non-SRA domains to read from raw/
-STANDARD_DOMAINS <- names(DOMAIN_LABELS)[names(DOMAIN_LABELS) != "ENA"]
+STANDARD_DOMAINS <- names(DOMAIN_LABELS)[!names(DOMAIN_LABELS) %in% c("ENA", "sra-sample")]
 
 # Domains with fewer total entries than this threshold are excluded from plots.
 # Applied before faceting so small domains don't produce near-empty panels.
@@ -120,6 +121,20 @@ DOMAIN_LU <- local({
   mask <- !is.na(doms)
   setNames(cans[mask], doms[mask])
 })
+
+# Canonical name → abbreviation lookup (e.g. "University of Oslo" → "UiO").
+ABBREV_LU <- local({
+  cans  <- sapply(inst_map$institutions, `[[`, "canonical")
+  abbrs <- sapply(inst_map$institutions, `[[`, "abbrev")
+  setNames(abbrs, cans)
+})
+
+# Map a canonical institution name to its abbreviation; leave unrecognised
+# values (including "Other Norway") unchanged.
+to_abbrev <- function(canonical) {
+  ab <- ABBREV_LU[[canonical]]
+  if (!is.null(ab) && !is.na(ab) && nzchar(ab)) ab else canonical
+}
 
 #' Robust EBI date parser.
 #' Handles: "20230115" (YYYYMMDD compact, most EBI fields),
@@ -193,6 +208,35 @@ normalise_institution <- function(affil_vec, email_vec = character(0)) {
   "Other Norway"
 }
 
+#' Return the single affiliation string most likely to have triggered the
+#' institution match, for display in the affiliation column.
+#'
+#' Priority:
+#'   1. Email address whose domain matched DOMAIN_LU
+#'   2. First affil string that normalise_institution() resolves to a known institution
+#'   3. First non-empty affil string (when only the fuzzy fallback fires or nothing matches)
+#'
+#' This avoids the old pipe-joined blob and lets the user see which piece of
+#' metadata actually drove the institution assignment.
+pick_affiliation <- function(affil_vec, email_vec = character(0)) {
+  # 1. Email domain lookup — return the canonical institution name if it matched.
+  for (em in email_vec[!is.na(email_vec) & nzchar(email_vec)]) {
+    dom <- tolower(sub(".*@", "", trimws(em)))
+    for (d in names(DOMAIN_LU)) {
+      if (dom == d || endsWith(dom, paste0(".", d))) return(DOMAIN_LU[[d]])
+    }
+  }
+
+  # 2. Try each affil string individually; return the first that matches.
+  valid <- affil_vec[!is.na(affil_vec) & nzchar(affil_vec)]
+  for (s in valid) {
+    if (normalise_institution(s) != "Other Norway") return(s)
+  }
+
+  # 3. Nothing matched — return the first available string as raw fallback.
+  if (length(valid) > 0) valid[[1L]] else NA_character_
+}
+
 # =============================================================================
 # 2.  Load and flatten all domains
 # =============================================================================
@@ -256,14 +300,15 @@ parse_entry <- function(entry, domain) {
     domain      = domain,
     accession   = entry$id %||% NA_character_,
     title       = pick_field(fields, c("name", "title", "abstract")),
-    affiliation = paste(affil_vals, collapse = " | "),
+    affiliation = pick_affiliation(affil_vals, email_vec = email_vals),
     country     = paste(country_vals, collapse = " | "),
     email       = if (length(email_vals) > 0) email_vals[[1]] else NA_character_,
     date        = parsed_date,
     year        = year(parsed_date),
     quarter     = quarter(parsed_date),
     month       = month(parsed_date),
-    institution = as.character(normalise_institution(affil_vals, email_vec = email_vals))[1L]
+    institution = to_abbrev(as.character(normalise_institution(affil_vals, email_vec = email_vals))[1L]),
+    broker      = NA_character_
   )
 }
 
@@ -299,17 +344,18 @@ parse_ena_row <- function(row) {
     domain      = "ENA",
     accession   = row$accession    %||% NA_character_,
     title       = row$title        %||% NA_character_,
-    affiliation = paste(affil_vals, collapse = " | "),
+    affiliation = pick_affiliation(affil_vals),
     country     = paste(country_vals, collapse = " | "),
     email       = NA_character_,
     date        = parsed_date,
     year        = year(parsed_date),
     quarter     = quarter(parsed_date),
     month       = month(parsed_date),
-    institution = as.character(normalise_institution(affil_vals))[1L]
+    institution = to_abbrev(as.character(normalise_institution(affil_vals))[1L]),
+    broker      = row$center_name %||% NA_character_
   )
 }
- 
+
 load_ena <- function() {
   path <- file.path(PROC_DIR, "ena_joined.json")
   if (!file.exists(path)) {
@@ -360,6 +406,7 @@ load_ena <- function() {
       email       = first(email[!is.na(email)]) %||% NA_character_,
       date        = suppressWarnings(min(date, na.rm = TRUE)),
       institution = majority(institution),
+      broker      = first(broker[!is.na(broker) & nzchar(broker)]) %||% NA_character_,
       .groups     = "drop"
     ) %>%
     mutate(
@@ -374,17 +421,75 @@ load_ena <- function() {
   df
 }
 
+#' Parse a single pre-filtered Norwegian sra-sample entry.
+#' Produces a row comparable to parse_ena_row but at sample granularity.
+parse_sra_sample <- function(entry) {
+  f <- entry$fields %||% list()
+
+  # broker_name: the ENA submitter / data broker (fetched field in sra-sample config).
+  # center_name: the submitting center / research institution.
+  # Both are tried for institution guessing; broker_name also drives the broker column.
+  broker_name <- pick_field(f, c("broker_name"))
+  center_name <- pick_field(f, c("center_name"))
+  country_val <- pick_field(f, c("country"))
+  affil_vals  <- Filter(function(x) !is.na(x) && nzchar(x),
+                        c(center_name, broker_name))
+
+  date_raw <- NA_character_
+  for (.df in c("first_public_date", "collection_date", "last_updated_date")) {
+    .v <- f[[.df]]
+    if (!is.null(.v) && length(.v) > 0 && nzchar(as.character(.v[[1]]))) {
+      date_raw <- as.character(.v[[1]]); break
+    }
+  }
+  parsed_date <- parse_ebi_date(date_raw)
+
+  tibble(
+    domain      = "sra-sample",
+    accession   = entry$id %||% NA_character_,
+    title       = pick_field(f, c("alias", "description")),
+    affiliation = pick_affiliation(affil_vals),
+    country     = country_val %||% NA_character_,
+    email       = NA_character_,
+    date        = parsed_date,
+    year        = year(parsed_date),
+    quarter     = quarter(parsed_date),
+    month       = month(parsed_date),
+    institution = to_abbrev(as.character(normalise_institution(affil_vals))[1L]),
+    broker      = broker_name %||% center_name %||% NA_character_
+  )
+}
+
+load_sra_samples <- function() {
+  path <- file.path(RAW_DIR, "sra-sample", "latest.json")
+  if (!file.exists(path)) {
+    message("  Skipping ENA Samples (no sra-sample/latest.json – run fetch_ebi_data.py first)")
+    return(NULL)
+  }
+  message("Loading ENA Samples (sra-sample) …")
+  raw     <- fromJSON(path, simplifyDataFrame = FALSE)
+  entries <- raw$entries %||% list()
+  rows    <- lapply(entries, parse_sra_sample)
+  df      <- bind_rows(Filter(Negate(is.null), rows))
+  message("  ENA Samples: ", nrow(df), " entries")
+  df
+}
+
 # ── Combine ───────────────────────────────────────────────────────────────────
 
 load_all_data <- function() {
   standard_rows <- lapply(STANDARD_DOMAINS, load_standard_domain)
   ena_rows      <- load_ena()
+  sample_rows   <- load_sra_samples()
 
-  df <- bind_rows(c(standard_rows, list(ena_rows)))
+  df <- bind_rows(c(standard_rows, list(ena_rows), list(sample_rows)))
   df <- df %>%
     mutate(
       domain_label = DOMAIN_LABELS[domain],
-      domain_label = if_else(is.na(domain_label), domain, domain_label)
+      domain_label = if_else(is.na(domain_label), domain, domain_label),
+      # Entries without a broker (non-ENA domains) get a label so the
+      # broker colour mode can include them with a neutral category.
+      broker       = if_else(is.na(broker) | !nzchar(broker), "Non-ENA", broker)
     ) %>%
     filter(!is.na(date))
   df
@@ -396,27 +501,27 @@ load_all_data <- function() {
 # =============================================================================
  
 # Distinct ColorBrewer palette, extended via interpolation when n > 12.
-# "Other Norway" is always pinned to mid-grey so it recedes visually.
-make_inst_palette <- function(institutions) {
-  institutions <- as.character(institutions)
-  non_other    <- sort(setdiff(institutions, "Other Norway"))
-  n            <- length(non_other)
- 
+# "Other Norway", "Other", and "Non-ENA" are pinned to grey so they recede.
+make_inst_palette <- function(values) {
+  values     <- as.character(values)
+  grey_keys  <- c("Other Norway", "Other", "Non-ENA")
+  non_grey   <- sort(setdiff(values, grey_keys))
+  n          <- length(non_grey)
+
   base_pal <- if (n <= 8) {
     RColorBrewer::brewer.pal(max(3L, n), "Set2")
   } else if (n <= 12) {
     RColorBrewer::brewer.pal(12L, "Set3")
   } else {
-    # Blend Set1 + Set2 + Dark2 for maximum distinctiveness
     colorRampPalette(
       c(RColorBrewer::brewer.pal(9,  "Set1"),
         RColorBrewer::brewer.pal(8,  "Set2"),
         RColorBrewer::brewer.pal(8,  "Dark2"))
     )(n)
   }
- 
-  pal <- setNames(base_pal[seq_along(non_other)], non_other)
-  if ("Other Norway" %in% institutions) pal["Other Norway"] <- "#AAAAAA"
+
+  pal <- setNames(base_pal[seq_along(non_grey)], non_grey)
+  for (g in intersect(grey_keys, values)) pal[g] <- "#AAAAAA"
   pal
 }
  
@@ -434,23 +539,29 @@ theme_nor <- function() {
     )
 }
  
-#' Primary plot: stacked bars coloured by institution, faceted by domain,
-#' X axis = time at chosen granularity.
+#' Grouped bar chart, faceted by domain, X axis = time at chosen granularity.
 #'
 #' @param df               data frame from load_all_data()
 #' @param granularity      "year" | "quarter" | "month"
-#' @param top_n_inst       keep this many institutions individually; rest → "Other Norway"
+#' @param top_n_inst       keep this many fill values individually; rest → residual category
 #' @param domains          character vector of domain_label values to include (NULL = all)
 #' @param min_year         drop entries before this year
 #' @param min_domain_entries exclude domains with fewer total entries than this threshold
+#' @param color_by         "institution" (default) or "broker" (ENA center_name)
 plot_time_by_domain <- function(df,
                                 granularity        = c("year", "quarter", "month"),
                                 top_n_inst         = 12L,
                                 domains            = NULL,
                                 min_year           = 2000L,
-                                min_domain_entries = MIN_DOMAIN_ENTRIES) {
+                                min_domain_entries = MIN_DOMAIN_ENTRIES,
+                                color_by           = c("institution", "broker")) {
   granularity <- match.arg(granularity)
- 
+  color_by    <- match.arg(color_by)
+
+  fill_col    <- color_by                          # column name in df
+  other_label <- if (color_by == "institution") "Other Norway" else "Other"
+  legend_name <- if (color_by == "institution") "Institution" else "ENA Broker / Center"
+
   d <- df
   if (!is.null(domains)) d <- d %>% filter(domain_label %in% domains)
   d <- d %>% filter(!is.na(date), year >= min_year, year <= year(Sys.Date()))
@@ -487,42 +598,35 @@ plot_time_by_domain <- function(df,
       time_label = format(date, "%Y\n%b")
     )
   )
- 
-  # ── Institution lumping ──────────────────────────────────────────────────
-  top_inst <- d %>%
-    count(institution, sort = TRUE) %>%
+
+  # ── Top-N lumping on the chosen fill column ──────────────────────────────
+  top_vals <- d %>%
+    count(.data[[fill_col]], sort = TRUE) %>%
     slice_head(n = top_n_inst) %>%
-    pull(institution)
- 
+    pull(.data[[fill_col]])
+
   d <- d %>%
-    mutate(institution = if_else(institution %in% top_inst,
-                                 institution, "Other Norway"))
- 
+    mutate(fill_val = if_else(.data[[fill_col]] %in% top_vals,
+                              .data[[fill_col]], other_label))
+
   # ── Aggregate ────────────────────────────────────────────────────────────
   counts <- d %>%
-    count(domain_label, time_val, time_label, institution, name = "n") %>%
-    # Order institutions: named first (by total), "Other Norway" last
-    mutate(institution = fct_reorder(institution, n, .fun = sum) %>%
-             fct_relevel("Other Norway", after = 0L))
- 
-  # Build palette keyed on the institutions present in this subset
-  pal <- make_inst_palette(levels(counts$institution))
- 
-  # ── One representative x-axis label per major tick ───────────────────────
-  x_labels <- counts %>%
-    distinct(time_val, time_label) %>%
-    arrange(time_val)
- 
-  # Grouped (dodged) bars — one bar per institution per time unit, not stacked.
-  # Kept in sync with shiny/app.R (see header note).
-  ggplot(counts, aes(x = time_val, y = n, fill = institution)) +
+    count(domain_label, time_val, time_label, fill_val, name = "n") %>%
+    mutate(fill_val = fct_reorder(fill_val, n, .fun = sum) %>%
+             fct_relevel(other_label, after = 0L))
+
+  pal      <- make_inst_palette(levels(counts$fill_val))
+  x_labels <- counts %>% distinct(time_val, time_label) %>% arrange(time_val)
+
+  # Grouped (dodged) bars — kept in sync with shiny/app.R (see header note).
+  ggplot(counts, aes(x = time_val, y = n, fill = fill_val)) +
     geom_col(
       position = position_dodge2(padding = 0.1, preserve = "single"),
       width    = if (granularity == "year") 0.8 else
                  if (granularity == "quarter") 0.22 else 0.07
     ) +
     facet_wrap(~domain_label, scales = "free_y", ncol = 2) +
-    scale_fill_manual(values = pal, name = "Institution") +
+    scale_fill_manual(values = pal, name = legend_name) +
     scale_x_continuous(
       breaks = x_labels$time_val,
       labels = x_labels$time_label
@@ -532,7 +636,7 @@ plot_time_by_domain <- function(df,
     labs(
       title    = "**Norwegian submissions to EBI repositories**",
       subtitle = glue(
-        "Grouped by institution · faceted by repository · granularity: {granularity}"
+        "Coloured by {color_by} · faceted by repository · granularity: {granularity}"
       ),
       x = NULL, y = "Number of entries"
     ) +
@@ -559,7 +663,7 @@ save_plots <- function(df) {
  
   df %>%
     select(domain, domain_label, accession, title, date, year,
-           quarter, month, institution, affiliation, country, email) %>%
+           quarter, month, institution, broker, affiliation, country, email) %>%
     readr::write_csv(file.path(OUT_DIR, "norwegian_entries.csv"))
  
   message("Done ✓  Files in ", OUT_DIR)
@@ -616,8 +720,14 @@ shiny_app <- function(df) {
           step  = 1L, sep = ""
         ),
 
+        radioButtons(
+          "color_by", "Colour bars by",
+          choices  = c("Institution" = "institution", "ENA Broker / Center" = "broker"),
+          selected = "institution", inline = TRUE
+        ),
+
         sliderInput(
-          "top_n_inst", "Top N institutions",
+          "top_n_inst", "Top N values to show",
           min = 3, max = 30, value = 8L, step = 1
         ),
 
@@ -633,9 +743,9 @@ shiny_app <- function(df) {
         ),
 
         hr(),
-        # Dynamic institution checkboxes: rebuilt when top_n / year / domain
-        # filters change.  All top-N institutions pre-ticked by default.
-        uiOutput("inst_checkbox"),
+        # Dynamic fill-value checkboxes: rebuilt when color_by / top_n / year /
+        # domain filters change.  All top-N values are pre-ticked by default.
+        uiOutput("fill_checkbox"),
 
         hr(),
         p(em(paste("Latest entry:", format(latest_date, "%Y-%m-%d")))),
@@ -663,41 +773,48 @@ shiny_app <- function(df) {
                year <= input$year_range[2])
     })
 
-    # Top-N institutions in the current year+domain window.
-    # "Other Norway" appended so the user can always toggle it.
-    top_institutions <- reactive({
-      req(input$top_n_inst)
-      top_inst <- base_df() |>
-        count(institution, sort = TRUE) |>
+    # Top-N fill values for the current color_by mode, year, and domain window.
+    # The residual sentinel ("Other Norway" / "Other") is always appended.
+    top_fill_vals <- reactive({
+      req(input$top_n_inst, input$color_by)
+      col        <- input$color_by
+      other_lbl  <- if (col == "institution") "Other Norway" else "Other"
+      top_vals   <- base_df() |>
+        count(.data[[col]], sort = TRUE) |>
         slice_head(n = input$top_n_inst) |>
-        pull(institution)
-      unique(c(top_inst, "Other Norway"))
+        pull(.data[[col]])
+      unique(c(top_vals, other_lbl))
     })
 
-    output$inst_checkbox <- renderUI({
-      inst <- top_institutions()
-      checkboxGroupInput("selected_inst", "Show institutions",
-                         choices = inst, selected = inst)
+    output$fill_checkbox <- renderUI({
+      vals  <- top_fill_vals()
+      label <- if (input$color_by == "institution") "Show institutions"
+               else "Show brokers / centers"
+      checkboxGroupInput("selected_fill", label,
+                         choices = vals, selected = vals)
     })
 
     output$main_plot <- renderPlot({
-      req(input$year_range, input$top_n_inst)
+      req(input$year_range, input$top_n_inst, input$color_by)
 
-      # Lump institutions to top-N, then apply checkbox filter.
-      # plot_time_by_domain is called with a high top_n_inst cap so it does not
-      # re-lump the already-collapsed institution column.
-      top_inst <- setdiff(top_institutions(), "Other Norway")
+      col       <- input$color_by
+      other_lbl <- if (col == "institution") "Other Norway" else "Other"
+
+      # Lump the fill column to top-N, then apply checkbox filter.
+      # plot_time_by_domain is called with top_n_inst = 999 to skip re-lumping.
+      top_vals <- setdiff(top_fill_vals(), other_lbl)
       d <- base_df() |>
-        mutate(institution = if_else(institution %in% top_inst,
-                                     institution, "Other Norway"))
+        mutate(across(all_of(col),
+                      ~ if_else(.x %in% top_vals, .x, other_lbl)))
 
-      if (!is.null(input$selected_inst) && length(input$selected_inst) > 0)
-        d <- d |> filter(institution %in% input$selected_inst)
+      if (!is.null(input$selected_fill) && length(input$selected_fill) > 0)
+        d <- d |> filter(.data[[col]] %in% input$selected_fill)
 
       plot_time_by_domain(
         d,
         granularity        = input$granularity,
-        top_n_inst         = 999L,   # lumping already done above
+        top_n_inst         = 999L,
+        color_by           = col,
         min_domain_entries = input$min_domain_entries
       )
     }, res = 120)
@@ -716,7 +833,7 @@ shiny_app <- function(df) {
           Title       = title,
           Date        = date,
           Institution = institution,
-          Affiliation = affiliation,
+          Broker      = broker,
           Email       = email
         ) |>
         arrange(desc(Date))

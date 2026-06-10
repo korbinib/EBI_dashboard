@@ -39,6 +39,7 @@ df <- readr::read_csv(
     quarter       = col_integer(),
     month         = col_integer(),
     institution   = col_character(),
+    broker        = col_character(),
     affiliation   = col_character(),
     country       = col_character(),
     email         = col_character()
@@ -48,10 +49,12 @@ df <- readr::read_csv(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-make_inst_palette <- function(institutions) {
-  institutions <- as.character(institutions)
-  non_other    <- sort(setdiff(institutions, "Other Norway"))
-  n            <- length(non_other)
+# "Other Norway", "Other", and "Non-ENA" are pinned to grey so they recede.
+make_inst_palette <- function(values) {
+  values    <- as.character(values)
+  grey_keys <- c("Other Norway", "Other", "Non-ENA")
+  non_grey  <- sort(setdiff(values, grey_keys))
+  n         <- length(non_grey)
 
   base_pal <- if (n <= 8) {
     RColorBrewer::brewer.pal(max(3L, n), "Set2")
@@ -65,8 +68,8 @@ make_inst_palette <- function(institutions) {
     )(n)
   }
 
-  pal <- setNames(base_pal[seq_along(non_other)], non_other)
-  if ("Other Norway" %in% institutions) pal["Other Norway"] <- "#AAAAAA"
+  pal <- setNames(base_pal[seq_along(non_grey)], non_grey)
+  for (g in intersect(grey_keys, values)) pal[g] <- "#AAAAAA"
   pal
 }
 
@@ -86,26 +89,31 @@ theme_nor <- function() {
 
 MIN_DOMAIN_ENTRIES <- 10L
 
-#' Grouped bar chart, one bar per institution per time period, faceted by domain.
-#'
-#' @param selected_inst  Character vector of institution names to show after
-#'   lumping.  NULL means show all (used while the checkbox UI is re-rendering).
+#' Grouped bar chart, faceted by domain.  Colour dimension is controlled by
+#' `color_by` ("institution" or "broker").  Pre-lumped data is accepted when
+#' top_n_inst = 999 (lumping already done in the server reactive).
 plot_time_by_domain <- function(df,
                                 granularity        = c("year", "quarter", "month"),
                                 top_n_inst         = 8L,
                                 domains            = NULL,
                                 year_range         = NULL,
-                                selected_inst      = NULL,
-                                min_domain_entries = MIN_DOMAIN_ENTRIES) {
+                                selected_fill      = NULL,
+                                min_domain_entries = MIN_DOMAIN_ENTRIES,
+                                color_by           = c("institution", "broker")) {
   granularity <- match.arg(granularity)
+  color_by    <- match.arg(color_by)
+
+  fill_col    <- color_by
+  other_label <- if (color_by == "institution") "Other Norway" else "Other"
+  legend_name <- if (color_by == "institution") "Institution" else "ENA Broker / Center"
 
   d <- df
-  if (!is.null(domains))                d <- d |> filter(domain_label %in% domains)
+  if (!is.null(domains))
+    d <- d |> filter(domain_label %in% domains)
   if (!is.null(year_range) && length(year_range) == 2)
     d <- d |> filter(year >= year_range[1], year <= year_range[2])
   d <- d |> filter(!is.na(date), year <= year(Sys.Date()))
 
-  # Drop repositories below entry threshold
   keep_domains <- d |>
     count(domain_label, name = "total") |>
     filter(total >= min_domain_entries) |>
@@ -115,7 +123,6 @@ plot_time_by_domain <- function(df,
   if (nrow(d) == 0)
     return(ggplot() + labs(title = "No data for current filters") + theme_void())
 
-  # Time axis
   d <- switch(granularity,
     year    = d |> mutate(time_val   = as.integer(year),
                           time_label = as.character(year)),
@@ -125,37 +132,37 @@ plot_time_by_domain <- function(df,
                           time_label = format(date, "%Y\n%b"))
   )
 
-  # Lump institutions outside top N into "Other Norway"
-  top_inst <- d |> count(institution, sort = TRUE) |>
-    slice_head(n = top_n_inst) |> pull(institution)
-  d <- d |> mutate(institution = if_else(institution %in% top_inst,
-                                         institution, "Other Norway"))
+  # Lump fill column to top-N (skipped when top_n_inst = 999 — pre-lumped).
+  if (top_n_inst < 999L) {
+    top_vals <- d |> count(.data[[fill_col]], sort = TRUE) |>
+      slice_head(n = top_n_inst) |> pull(.data[[fill_col]])
+    d <- d |> mutate(across(all_of(fill_col),
+                             ~ if_else(.x %in% top_vals, .x, other_label)))
+  }
 
-  # Apply institution checkbox filter (NULL = show all, used during re-render)
-  if (!is.null(selected_inst) && length(selected_inst) > 0)
-    d <- d |> filter(institution %in% selected_inst)
+  if (!is.null(selected_fill) && length(selected_fill) > 0)
+    d <- d |> filter(.data[[fill_col]] %in% selected_fill)
 
   if (nrow(d) == 0)
-    return(ggplot() + labs(title = "No institutions selected") + theme_void())
+    return(ggplot() + labs(title = "No values selected") + theme_void())
 
   counts <- d |>
-    count(domain_label, time_val, time_label, institution, name = "n") |>
-    mutate(institution = fct_reorder(institution, n, .fun = sum) |>
-             fct_relevel("Other Norway", after = 0L))
+    count(domain_label, time_val, time_label, .data[[fill_col]], name = "n") |>
+    rename(fill_val = all_of(fill_col)) |>
+    mutate(fill_val = fct_reorder(fill_val, n, .fun = sum) |>
+             fct_relevel(other_label, after = 0L))
 
-  pal      <- make_inst_palette(levels(counts$institution))
+  pal      <- make_inst_palette(levels(counts$fill_val))
   x_labels <- counts |> distinct(time_val, time_label) |> arrange(time_val)
-
-  # Per-granularity group width: bars within a time unit span this fraction
   bar_width <- switch(granularity, year = 0.8, quarter = 0.22, month = 0.07)
 
-  ggplot(counts, aes(x = time_val, y = n, fill = institution)) +
+  ggplot(counts, aes(x = time_val, y = n, fill = fill_val)) +
     geom_col(
       position = position_dodge2(padding = 0.1, preserve = "single"),
       width    = bar_width
     ) +
     facet_wrap(~domain_label, scales = "free_y", ncol = 2) +
-    scale_fill_manual(values = pal, name = "Institution") +
+    scale_fill_manual(values = pal, name = legend_name) +
     scale_x_continuous(
       breaks = x_labels$time_val,
       labels = x_labels$time_label
@@ -168,7 +175,7 @@ plot_time_by_domain <- function(df,
     labs(
       title    = "Norwegian submissions to EBI repositories",
       subtitle = glue(
-        "Grouped by institution · faceted by repository · {granularity}"
+        "Coloured by {color_by} · faceted by repository · {granularity}"
       ),
       x = NULL, y = "Number of entries"
     ) +
@@ -176,7 +183,7 @@ plot_time_by_domain <- function(df,
 }
 
 # ── Derived constants ─────────────────────────────────────────────────────────
-domain_choices <- sort(unique(df$domain_label))
+domain_choices  <- sort(unique(df$domain_label))
 year_range_data <- range(df$year, na.rm = TRUE)
 latest_date     <- max(df$date, na.rm = TRUE)
 
@@ -206,9 +213,16 @@ ui <- fluidPage(
         sep   = ""
       ),
 
+      radioButtons(
+        "color_by", "Colour bars by",
+        choices  = c("Institution" = "institution",
+                     "ENA Broker / Center" = "broker"),
+        selected = "institution", inline = TRUE
+      ),
+
       sliderInput(
-        "top_n_inst", "Top N institutions",
-        min = 3, max = 30, value = 10L, step = 1
+        "top_n_inst", "Top N values to show",
+        min = 3, max = 30, value = 8L, step = 1
       ),
 
       sliderInput(
@@ -224,9 +238,9 @@ ui <- fluidPage(
       ),
 
       hr(),
-      # Dynamic institution list: rebuilt when top_n or domain/year filters change.
-      # All top-N institutions are ticked by default; user may untick to hide.
-      uiOutput("inst_checkbox"),
+      # Dynamic fill-value checkboxes: rebuilt when color_by / top_n / year /
+      # domain filters change.  All top-N values are pre-ticked by default.
+      uiOutput("fill_checkbox"),
 
       hr(),
       p(em(paste("Latest entry:", format(latest_date, "%Y-%m-%d")))),
@@ -245,44 +259,57 @@ ui <- fluidPage(
 # ── Server ────────────────────────────────────────────────────────────────────
 server <- function(input, output, session) {
 
-  # Top N institutions for the current domain + year filter.
-  # Used both to populate the checkbox and to drive the lump in the plot.
-  top_institutions <- reactive({
-    req(input$top_n_inst, input$year_range)
-    d <- df
-    if (!is.null(input$domains))
-      d <- d |> filter(domain_label %in% input$domains)
-    d <- d |> filter(year >= input$year_range[1], year <= input$year_range[2])
-
-    top_inst <- d |>
-      count(institution, sort = TRUE) |>
-      slice_head(n = input$top_n_inst) |>
-      pull(institution)
-
-    # Always include "Other Norway" so the user can toggle it
-    unique(c(top_inst, "Other Norway"))
+  base_df <- reactive({
+    req(input$year_range, input$domains)
+    df |>
+      filter(domain_label %in% input$domains,
+             !is.na(year),
+             year >= input$year_range[1],
+             year <= input$year_range[2])
   })
 
-  # Rebuild the checkbox whenever the institution list changes.
-  # All entries ticked by default; selections reset when the list changes.
-  output$inst_checkbox <- renderUI({
-    inst <- top_institutions()
-    checkboxGroupInput(
-      "selected_inst", "Show institutions",
-      choices  = inst,
-      selected = inst
-    )
+  # Top-N fill values for the current color_by mode, domain, and year window.
+  top_fill_vals <- reactive({
+    req(input$top_n_inst, input$color_by)
+    col       <- input$color_by
+    other_lbl <- if (col == "institution") "Other Norway" else "Other"
+    top_vals  <- base_df() |>
+      count(.data[[col]], sort = TRUE) |>
+      slice_head(n = input$top_n_inst) |>
+      pull(.data[[col]])
+    unique(c(top_vals, other_lbl))
+  })
+
+  # Rebuild checkboxes whenever the fill list changes; all pre-ticked.
+  output$fill_checkbox <- renderUI({
+    vals  <- top_fill_vals()
+    label <- if (input$color_by == "institution") "Show institutions"
+             else "Show brokers / centers"
+    checkboxGroupInput("selected_fill", label,
+                       choices = vals, selected = vals)
   })
 
   output$main_plot <- renderPlot({
-    req(input$year_range)
+    req(input$year_range, input$color_by)
+
+    col       <- input$color_by
+    other_lbl <- if (col == "institution") "Other Norway" else "Other"
+
+    # Pre-lump then apply checkbox filter; pass top_n_inst=999 to skip re-lump.
+    top_vals <- setdiff(top_fill_vals(), other_lbl)
+    d <- base_df() |>
+      mutate(across(all_of(col),
+                    ~ if_else(.x %in% top_vals, .x, other_lbl)))
+
+    if (!is.null(input$selected_fill) && length(input$selected_fill) > 0)
+      d <- d |> filter(.data[[col]] %in% input$selected_fill)
+
     plot_time_by_domain(
-      df,
+      d,
       granularity        = input$granularity,
-      top_n_inst         = input$top_n_inst,
-      domains            = input$domains,
-      year_range         = input$year_range,
-      selected_inst      = input$selected_inst,
+      top_n_inst         = 999L,
+      color_by           = col,
+      selected_fill      = NULL,   # already filtered above
       min_domain_entries = input$min_domain_entries
     )
   }, res = 120)
@@ -308,6 +335,7 @@ server <- function(input, output, session) {
         Title       = title,
         Date        = date,
         Institution = institution,
+        Broker      = broker,
         Email       = email
       ) |>
       arrange(desc(Date))
