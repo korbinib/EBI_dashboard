@@ -42,10 +42,14 @@ df <- readr::read_csv(
     broker        = col_character(),
     affiliation   = col_character(),
     country       = col_character(),
-    email         = col_character()
+    email         = col_character(),
+    identifier_url = col_character()
   ),
   show_col_types = FALSE
 )
+
+# Tolerate an older CSV that predates the identifiers.org link column.
+if (!"identifier_url" %in% names(df)) df$identifier_url <- NA_character_
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -183,9 +187,15 @@ plot_time_by_domain <- function(df,
 }
 
 # ── Derived constants ─────────────────────────────────────────────────────────
+# Guard against an empty / all-NA CSV: range()/max() on no values return
+# Inf/-Inf, which would feed Inf into the year sliderInput and the "Latest entry"
+# label.  Fall back to a sane window when there is no dated data yet.
 domain_choices  <- sort(unique(df$domain_label))
-year_range_data <- range(df$year, na.rm = TRUE)
-latest_date     <- max(df$date, na.rm = TRUE)
+valid_years     <- df$year[!is.na(df$year)]
+this_year       <- as.integer(format(Sys.Date(), "%Y"))
+year_range_data <- if (length(valid_years)) range(valid_years) else c(2000L, this_year)
+valid_dates     <- df$date[!is.na(df$date)]
+latest_date     <- if (length(valid_dates)) max(valid_dates) else Sys.Date()
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 ui <- fluidPage(
@@ -329,6 +339,10 @@ server <- function(input, output, session) {
              !is.na(year),
              year >= input$year_range[1],
              year <= input$year_range[2]) |>
+      mutate(accession = ifelse(
+        is.na(identifier_url) | !nzchar(identifier_url), accession,
+        sprintf('<a href="%s" target="_blank" rel="noopener">%s</a>',
+                identifier_url, accession))) |>
       select(
         Repository  = domain_label,
         Accession   = accession,
@@ -339,7 +353,10 @@ server <- function(input, output, session) {
         Email       = email
       ) |>
       arrange(desc(Date))
-  }, options = list(pageLength = 10, scrollX = TRUE), filter = "top")
+    # Escape every column by name except Accession, which holds the link HTML.
+    # (Column names avoid the rownames-offset ambiguity of numeric indices.)
+  }, options = list(pageLength = 10, scrollX = TRUE), filter = "top",
+     escape = c("Repository", "Title", "Date", "Institution", "Broker", "Email"))
 }
 
 shinyApp(ui, server)

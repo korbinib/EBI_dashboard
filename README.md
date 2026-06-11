@@ -16,6 +16,17 @@
 | PRIDE | `pride` | `submitter_affiliation`, `submitter_country` |
 | BioModels | `biomodels` | `submitter_affiliation` |
 | ENA/SRA | `sra-study`, `sra-experiment`, `sra-sample` | `center_name`, `country` (sample) |
+| EGA | `ega`, `ega-sample` (EGA Metadata API, not EBI Search) | DAC contact `institution_name`, `email` |
+
+> **EGA** is fetched from the separate [EGA Public Metadata API](https://metadata.ega-archive.org)
+> rather than EBI Search (which exposes no dates/affiliations for it).  Data Access
+> Committees (DACs) are filtered to Norwegian ones — by contact `institution_name`
+> or by email **domain** (`.no` or a known institution `web_domain`) — and the
+> records below the matching DACs are plotted:
+> - `ega` — **studies** (DAC → datasets → studies).
+> - `ega-sample` — **samples** (DAC → datasets → samples), mirroring `ENA Samples`.
+>   Samples have no public date/affiliation, so each inherits the parent dataset's
+>   release date and the parent DAC's institution/email.
 
 ---
 
@@ -34,12 +45,34 @@ GitHub Actions (cron 02:30 UTC)
 │    ├─ Joins studies → experiments → samples via shared accession keys
 │    └─ Writes data/processed/ena_joined.json
 │
+├─ scripts/fetch_ega.py
+│    ├─ Queries EGA Public Metadata API  (GET metadata.ega-archive.org/dacs…)
+│    ├─ Keeps Norwegian DACs (institution_name regex / email .no|web_domain)
+│    ├─ Walks DAC → datasets → studies + samples
+│    └─ Writes data/raw/ega/latest.json + data/raw/ega-sample/latest.json
+│       (same {id, fields} shape as the EBI Search domains)
+│
+├─ scripts/fetch_identifiers.py
+│    ├─ Caches the identifiers.org namespace registry (prefix → pattern)
+│    └─ Writes data/identifiers_namespaces.json
+│
 └─ R/plot_norwegian_data.R
      ├─ Loads all latest.json + ena_joined.json
      ├─ Filters rows mentioning Norway/Norge/Norwegian in affil/country fields
      ├─ Normalises institution names (regex → fuzzy fallback → "Other Norway")
+     ├─ Builds identifiers.org links (validated against the registry pattern)
      └─ Saves PNG plots + norwegian_entries.csv to output/
 ```
+
+### Accession links (identifiers.org)
+
+Each domain declares an `identifiers_prefix` in its definition (e.g. `pride` →
+`pride.project`, `sra-study` → `["insdc.sra", "bioproject"]`).  The render step
+checks every accession against that prefix's [identifiers.org](https://identifiers.org)
+registry pattern and, on a match, builds a `https://identifiers.org/<prefix>:<acc>`
+link (an unmatched or mis-mapped accession simply gets no link).  These render as
+clickable accessions in the Shiny dashboard's table.  EGA samples (`EGAN…`) have
+no identifiers.org namespace, so they are left unlinked.
 
 ---
 

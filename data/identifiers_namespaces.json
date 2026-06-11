@@ -1,0 +1,45 @@
+{
+  "namespace_count": 8,
+  "namespaces": {
+    "biomodels.db": {
+      "prefix": "biomodels.db",
+      "pattern": "^((BIOMD|MODEL)\\d{10})|(BMID\\d{12})$",
+      "name": "BioModels Database"
+    },
+    "bioproject": {
+      "prefix": "bioproject",
+      "pattern": "^PRJ[DEN][A-Z]\\d+$",
+      "name": "BioProject"
+    },
+    "biosample": {
+      "prefix": "biosample",
+      "pattern": "^SAM[NED](\\w)?\\d+$",
+      "name": "BioSample"
+    },
+    "biostudies": {
+      "prefix": "biostudies",
+      "pattern": "^S-[A-Z]{4}[\\-\\_A-Z\\d]+$",
+      "name": "BioStudies database"
+    },
+    "ega.study": {
+      "prefix": "ega.study",
+      "pattern": "^EGAS\\d{11}$",
+      "name": "European Genome-phenome Archive Study"
+    },
+    "insdc.sra": {
+      "prefix": "insdc.sra",
+      "pattern": "^[SED]R[APRSXZ]\\d+$",
+      "name": "Sequence Read Archive"
+    },
+    "metabolights": {
+      "prefix": "metabolights",
+      "pattern": "^MTBL[CS]\\d+$",
+      "name": "MetaboLights"
+    },
+    "pride.project": {
+      "prefix": "pride.project",
+      "pattern": "^P(X|R|A)D\\d{6}$",
+      "name": "PRIDE Project"
+    }
+  }
+}

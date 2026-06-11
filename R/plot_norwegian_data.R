@@ -65,6 +65,8 @@ if (requireNamespace("here", quietly = TRUE)) {
 RAW_DIR   <- file.path(ROOT, "data", "raw")
 PROC_DIR  <- file.path(ROOT, "data", "processed")
 INST_MAP  <- file.path(ROOT, "data", "institution_map.json")
+DOMAINS_JSON     <- file.path(ROOT, "data", "domains.json")
+IDENTIFIERS_JSON <- file.path(ROOT, "data", "identifiers_namespaces.json")
 OUT_DIR   <- file.path(ROOT, "output")
 
 # create OUT_DIR if it doesn't exist (recursively), avoid warning if it already exists
@@ -79,6 +81,8 @@ DOMAIN_LABELS <- c(
   "metabolights"     = "MetaboLights",
   "pride"            = "PRIDE",
   "biomodels"        = "BioModels",
+  "ega"              = "EGA",
+  "ega-sample"       = "EGA Samples",
   "ENA"              = "ENA Studies",
   "sra-sample"       = "ENA Samples"
 )
@@ -89,6 +93,59 @@ STANDARD_DOMAINS <- names(DOMAIN_LABELS)[!names(DOMAIN_LABELS) %in% c("ENA", "sr
 # Domains with fewer total entries than this threshold are excluded from plots.
 # Applied before faceting so small domains don't produce near-empty panels.
 MIN_DOMAIN_ENTRIES <- 10L
+
+# ── identifiers.org links ─────────────────────────────────────────────────────
+# Map each `domain` value to its identifiers.org prefix(es).  The EBI/SRA domains
+# carry `identifiers_prefix` in data/domains.json (the domain definitions); the
+# joined ENA and EGA domains aren't in that dict, so they're supplemented here.
+# NS_PATTERNS holds the registry validation pattern per prefix (cached by
+# scripts/fetch_identifiers.py); an accession is only linked if it matches.
+NS_PATTERNS <- local({
+  if (!file.exists(IDENTIFIERS_JSON)) {
+    message("  No identifiers cache (", IDENTIFIERS_JSON, ") – links disabled")
+    return(list())
+  }
+  ns  <- fromJSON(IDENTIFIERS_JSON, simplifyVector = FALSE)$namespaces
+  out <- list()
+  for (p in names(ns)) {
+    pat <- ns[[p]]$pattern
+    if (!is.null(pat) && nzchar(pat)) out[[p]] <- pat
+  }
+  out
+})
+
+DOMAIN_IDENTIFIERS <- local({
+  m <- list()
+  if (file.exists(DOMAINS_JSON)) {
+    dj <- fromJSON(DOMAINS_JSON, simplifyVector = FALSE)$domains
+    for (k in names(dj)) {
+      pfx <- dj[[k]]$identifiers_prefix
+      if (!is.null(pfx)) m[[k]] <- unlist(pfx, use.names = FALSE)
+    }
+  }
+  # Domains plotted under a `domain` value that isn't a DOMAINS key:
+  if (!is.null(m[["sra-study"]])) m[["ENA"]] <- m[["sra-study"]]  # joined studies
+  m[["ega"]] <- "ega.study"   # EGAS… (EGA samples / EGAN have no identifiers.org namespace)
+  m
+})
+
+#' Build a validated identifiers.org resolver URL for one accession, or NA.
+#' Tries each candidate prefix for the domain and links the first whose registry
+#' pattern matches, so a mis-mapped or malformed accession yields no link.
+make_identifier_url <- function(accession, domain) {
+  if (is.na(accession) || !nzchar(accession)) return(NA_character_)
+  prefixes <- DOMAIN_IDENTIFIERS[[domain]]
+  if (is.null(prefixes)) return(NA_character_)
+  for (pfx in prefixes) {
+    pat <- NS_PATTERNS[[pfx]]
+    if (is.null(pat)) next
+    # A malformed registry pattern must not crash the whole render.
+    matched <- isTRUE(tryCatch(grepl(pat, accession, perl = TRUE),
+                               error = function(e) FALSE))
+    if (matched) return(sprintf("https://identifiers.org/%s:%s", pfx, accession))
+  }
+  NA_character_
+}
 
 # =============================================================================
 # 1.  Institution normalisation
@@ -130,8 +187,12 @@ ABBREV_LU <- local({
 })
 
 # Map a canonical institution name to its abbreviation; leave unrecognised
-# values (including "Other Norway") unchanged.
+# values (including "Other Norway") unchanged.  Guard the [[ ]] lookup: indexing
+# a named atomic vector with an absent name errors ("subscript out of bounds"),
+# which fires for every value not in the map (e.g. "Other Norway").
 to_abbrev <- function(canonical) {
+  if (is.null(canonical) || is.na(canonical) || !nzchar(canonical)) return(canonical)
+  if (!canonical %in% names(ABBREV_LU)) return(canonical)
   ab <- ABBREV_LU[[canonical]]
   if (!is.null(ab) && !is.na(ab) && nzchar(ab)) ab else canonical
 }
@@ -163,8 +224,13 @@ parse_ebi_date <- function(x) {
 #' Matching priority:
 #'   1. Email domain lookup  (@uio.no → "University of Oslo", decisive signal)
 #'   2. Regex pattern matching on combined affiliation text
+#'   2b. Exact Norwegian-name match (canonical_no, e.g. "Universitetet i Oslo")
 #'   3. Per-token Jaro-Winkler against abbreviations (catches "UiO"/"NTNU" in noisy strings)
-#'   4. Full-string Jaro-Winkler against canonical names (informal long-form names)
+#'   4. Full-string Jaro-Winkler against canonical AND canonical_no names
+#'
+#' canonical_no (the Norwegian-language institution name) is folded into both the
+#' literal match (2b) and the fuzzy fallback (4); either way the English
+#' `canonical` name is returned so the display value stays consistent.
 #'
 #' Returns the canonical institution name, or "Other Norway" if nothing matches.
 normalise_institution <- function(affil_vec, email_vec = character(0)) {
@@ -187,9 +253,19 @@ normalise_institution <- function(affil_vec, email_vec = character(0)) {
     }
   }
 
-  # 3 & 4. Fuzzy fallback.
-  all_canonical <- sapply(inst_map$institutions, `[[`, "canonical")
-  all_abbrevs   <- sapply(inst_map$institutions, `[[`, "abbrev")
+  all_canonical    <- sapply(inst_map$institutions, `[[`, "canonical")
+  all_canonical_no <- sapply(inst_map$institutions,
+                             function(i) i$canonical_no %||% NA_character_)
+  all_abbrevs      <- sapply(inst_map$institutions, `[[`, "abbrev")
+
+  # 2b. Exact (case-insensitive, literal) match on the Norwegian name.
+  affil_lc <- tolower(affil)
+  for (i in seq_along(all_canonical_no)) {
+    cno <- all_canonical_no[i]
+    if (!is.na(cno) && nzchar(cno) && grepl(tolower(cno), affil_lc, fixed = TRUE)) {
+      return(all_canonical[i])
+    }
+  }
 
   # 3. Per-token JW against abbreviations (abbreviation-length tokens only).
   tokens <- unlist(strsplit(affil, "[,;/()\\s]+"))
@@ -200,10 +276,13 @@ normalise_institution <- function(affil_vec, email_vec = character(0)) {
     if (dist_abbr[best] < 0.15) return(all_canonical[best])
   }
 
-  # 4. Full-string JW against canonical names (run once, outside the token loop).
-  dist_full <- stringdist(tolower(affil), tolower(all_canonical), method = "jw")
+  # 4. Full-string JW against both English and Norwegian names; per institution
+  #    take the better of the two, then return the English canonical.
+  dist_en <- stringdist(affil_lc, tolower(all_canonical),    method = "jw")
+  dist_no <- stringdist(affil_lc, tolower(all_canonical_no), method = "jw")
+  dist_full <- pmin(dist_en, dist_no, na.rm = TRUE)
   best_full <- which.min(dist_full)
-  if (dist_full[best_full] < 0.22) return(all_canonical[best_full])
+  if (length(best_full) && dist_full[best_full] < 0.22) return(all_canonical[best_full])
 
   "Other Norway"
 }
@@ -489,7 +568,11 @@ load_all_data <- function() {
       domain_label = if_else(is.na(domain_label), domain, domain_label),
       # Entries without a broker (non-ENA domains) get a label so the
       # broker colour mode can include them with a neutral category.
-      broker       = if_else(is.na(broker) | !nzchar(broker), "Non-ENA", broker)
+      broker       = if_else(is.na(broker) | !nzchar(broker), "Non-ENA", broker),
+      # Validated identifiers.org resolver URL (NA when the accession matches no
+      # namespace pattern); rendered as a clickable accession in the dashboard.
+      identifier_url = mapply(make_identifier_url, accession, domain,
+                              USE.NAMES = FALSE)
     ) %>%
     filter(!is.na(date))
   df
@@ -663,7 +746,8 @@ save_plots <- function(df) {
  
   df %>%
     select(domain, domain_label, accession, title, date, year,
-           quarter, month, institution, broker, affiliation, country, email) %>%
+           quarter, month, institution, broker, affiliation, country, email,
+           identifier_url) %>%
     readr::write_csv(file.path(OUT_DIR, "norwegian_entries.csv"))
  
   message("Done ✓  Files in ", OUT_DIR)
@@ -827,6 +911,10 @@ shiny_app <- function(df) {
         pull(domain_label)
       base_df() |>
         filter(domain_label %in% keep) |>
+        mutate(accession = ifelse(
+          is.na(identifier_url) | !nzchar(identifier_url), accession,
+          sprintf('<a href="%s" target="_blank" rel="noopener">%s</a>',
+                  identifier_url, accession))) |>
         select(
           Repository  = domain_label,
           Accession   = accession,
@@ -837,7 +925,10 @@ shiny_app <- function(df) {
           Email       = email
         ) |>
         arrange(desc(Date))
-    }, options = list(pageLength = 10, scrollX = TRUE), filter = "top")
+      # Escape every column by name except Accession, which holds the link HTML.
+      # (Column names avoid the rownames-offset ambiguity of numeric indices.)
+    }, options = list(pageLength = 10, scrollX = TRUE), filter = "top",
+       escape = c("Repository", "Title", "Date", "Institution", "Broker", "Email"))
   }
 
   shinyApp(ui, server)

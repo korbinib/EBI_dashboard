@@ -115,6 +115,10 @@ DOMAINS: dict[str, dict] = {
             "journal_name", "legend", "license", "method", "modified_date",
             "name", "omics_type", "release_date", "repository", "species",
         ],
+        # identifiers.org prefix(es) for this domain's accessions; consumed by
+        # the R render step to build https://identifiers.org/<prefix>:<acc> links
+        # (the accession is validated against the registry pattern first).
+        "identifiers_prefix": "biostudies",
     },
     "biostudies-other": {
         "required_fields": [
@@ -125,6 +129,7 @@ DOMAINS: dict[str, dict] = {
             "pagination", "pmcid", "project", "pub_date", "release_date",
             "repository", "species", "volume",
         ],
+        "identifiers_prefix": "biostudies",
     },
     "metabolights": {
         "required_fields": [
@@ -136,6 +141,7 @@ DOMAINS: dict[str, dict] = {
             "submitter_affiliation", "submitter_email", "submitter_name",
             "technology_type",
         ],
+        "identifiers_prefix": "metabolights",
     },
     "pride": {
         "required_fields": [
@@ -149,6 +155,7 @@ DOMAINS: dict[str, dict] = {
             "submitter_affiliation", "submitter_country", "submitter_keywords",
             "submitter_mail", "technology_type", "tissue",
         ],
+        "identifiers_prefix": "pride.project",
     },
     "biomodels": {
         "required_fields": [
@@ -163,10 +170,13 @@ DOMAINS: dict[str, dict] = {
             "submitter", "submitter_affiliation", "submitter_keywords",
             "submitter_mail", "tokenised_name",
         ],
+        "identifiers_prefix": "biomodels.db",
     },
-    # EGA (European Genome-phenome Archive): omitted because the EBI Search
-    # index returns only id, description, and name — no date fields and no
-    # affiliation fields are populated, making Norwegian detection impossible.
+    # EGA (European Genome-phenome Archive): NOT a DOMAINS entry because the EBI
+    # Search index returns only id/description/name for it — no dates and no
+    # affiliation fields — making Norwegian detection impossible here.  EGA is
+    # instead fetched from the EGA Public Metadata API by scripts/fetch_ega.py
+    # (DACs → datasets → studies) and written to data/raw/ega/latest.json.
     "sra-study": {
         "required_fields": [
             "abstract", "acc", "alias", "center_project_name", "description",
@@ -176,6 +186,9 @@ DOMAINS: dict[str, dict] = {
         # first_public_date is not searchable in sra-study; total ≈730K (<1M)
         # so standard single-pass pagination handles it without partitioning.
         "join_key": "study_accession",
+        # ENA/SRA study accessions are SRP/ERP/DRP (insdc.sra) or PRJ* (bioproject);
+        # the render tries each prefix and links the one whose pattern matches.
+        "identifiers_prefix": ["insdc.sra", "bioproject"],
     },
     "sra-sample": {
         "required_fields": [
@@ -187,6 +200,7 @@ DOMAINS: dict[str, dict] = {
         ],
         "partition_date_field": "first_public_date",
         "join_key": "sample_accession",
+        "identifiers_prefix": "biosample",
     },
     "sra-experiment": {
         "required_fields": [
@@ -200,6 +214,7 @@ DOMAINS: dict[str, dict] = {
         ],
         "partition_date_field": "first_public_date",
         "join_key": "study_accession",
+        "identifiers_prefix": ["insdc.sra", "bioproject"],
     },
 }
 
@@ -409,15 +424,22 @@ def fetch_domain_partitioned(domain: str, cfg: dict, fields: list[str],
 
     def _add(batch: list[dict]) -> None:
         for e in batch:
+            # Entries with an id de-dup by id; id-less entries (rare) de-dup by
+            # their content so the same record appearing in overlapping or
+            # retried windows is not counted twice.
             eid = e.get("id", "")
-            if eid and eid in seen_ids:
+            key = eid or json.dumps(e.get("fields", {}), sort_keys=True,
+                                    ensure_ascii=False)
+            if key in seen_ids:
                 continue
-            if eid:
-                seen_ids.add(eid)
+            seen_ids.add(key)
             all_entries.append(e)
 
-    def _date_range(year: int, month: int | None,
-                    quarter: int | None) -> tuple[str, str]:
+    def _date_range(year: int, month: int | None, quarter: int | None,
+                    day: int | None = None) -> tuple[str, str]:
+        if day is not None and month is not None:
+            return (f"{year}-{month:02d}-{day:02d}",
+                    f"{year}-{month:02d}-{day:02d}")
         if month is not None:
             last_day = calendar.monthrange(year, month)[1]
             return (f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day:02d}")
@@ -429,10 +451,12 @@ def fetch_domain_partitioned(domain: str, cfg: dict, fields: list[str],
         return (f"{year}-01-01", f"{year}-12-31")
 
     def _fetch_or_load(key: str, year: int, quarter: int | None,
-                       month: int | None, indent: str = "  ") -> list[dict]:
+                       month: int | None, day: int | None = None,
+                       indent: str = "  ") -> list[dict]:
         """
-        Return entries for one date window, splitting recursively if needed.
-        Immutable windows are served from disk; refetch windows are re-downloaded.
+        Return entries for one date window, splitting recursively if needed
+        (year → quarter → month → day).  Immutable windows are served from disk;
+        refetch windows are re-downloaded.
         """
         # Immutable window: serve from disk if file is OK
         if year <= immutable_max:
@@ -444,7 +468,7 @@ def fetch_domain_partitioned(domain: str, cfg: dict, fields: list[str],
         else:
             _invalidate_partition(domain, key, manifest)
 
-        d_start, d_end = _date_range(year, month, quarter)
+        d_start, d_end = _date_range(year, month, quarter, day)
         window_query   = f"{date_field}:[{d_start} TO {d_end}]"
         count = get_hit_count(domain, fields, window_query)
         log.info("%s%s  %s–%s  %d entries", indent, domain, d_start, d_end, count)
@@ -463,12 +487,14 @@ def fetch_domain_partitioned(domain: str, cfg: dict, fields: list[str],
             time.sleep(RATE_SLEEP)
             return entries
 
-        # Window too large: split recursively
-        if month is not None:
+        # Window too large: split to the next finer granularity.
+        if day is not None:
+            # A single day over the cap is unsplittable (the API has no sub-day
+            # date field), so fetch up to the cap and warn.  Vanishingly rare.
             log.warning(
-                "%s%s %s has %d entries > MAX_PAGEABLE=%d; "
-                "fetching up to %d — some entries will be missed.",
-                indent, domain, d_start[:7], count, MAX_PAGEABLE, MAX_PAGEABLE,
+                "%s%s %s has %d entries > MAX_PAGEABLE=%d; fetching up to %d — "
+                "some entries will be missed.",
+                indent, domain, d_start, count, MAX_PAGEABLE, MAX_PAGEABLE,
             )
             entries = _fetch_window(domain, fields, window_query,
                                     geo_re, inst_regexes)
@@ -476,19 +502,29 @@ def fetch_domain_partitioned(domain: str, cfg: dict, fields: list[str],
             time.sleep(RATE_SLEEP)
             return entries
 
-        if quarter is not None:
+        if month is not None:
             sub: list[dict] = []
+            last_day = calendar.monthrange(year, month)[1]
+            for d in range(1, last_day + 1):
+                sub.extend(_fetch_or_load(
+                    f"{year}_M{month:02d}_D{d:02d}", year, None, month, d,
+                    indent + "  "))
+            _save_partition(domain, key, sub, manifest)
+            return sub
+
+        if quarter is not None:
+            sub = []
             m0 = (quarter - 1) * 3 + 1
             for m in range(m0, m0 + 3):
                 sub.extend(_fetch_or_load(
-                    f"{year}_M{m:02d}", year, None, m, indent + "  "))
+                    f"{year}_M{m:02d}", year, None, m, None, indent + "  "))
             _save_partition(domain, key, sub, manifest)
             return sub
 
         sub = []
         for q in range(1, 5):
             sub.extend(_fetch_or_load(
-                f"{year}_Q{q}", year, q, None, indent + "  "))
+                f"{year}_Q{q}", year, q, None, None, indent + "  "))
         _save_partition(domain, key, sub, manifest)
         return sub
 
@@ -680,6 +716,15 @@ def main():
     log.info("Starting EBI fetch (sequential / local)  date=%s", TODAY)
     save_domains_json()
 
+    # Cache the identifiers.org namespace registry for the link feature.  Failure
+    # is non-fatal (the render step simply skips links it can't build).
+    log.info("─── Caching identifiers.org namespaces ───")
+    try:
+        import fetch_identifiers
+        fetch_identifiers.main()
+    except Exception as exc:
+        log.error("fetch_identifiers failed: %s", exc)
+
     # Build the Norwegian filter once and reuse it across all domains.
     geo_tokens   = load_geo_tokens()
     inst_regexes = load_institution_regexes()
@@ -709,6 +754,16 @@ def main():
         log.info("join_ena ✓")
     except Exception as exc:
         log.error("join_ena failed: %s", exc)
+
+    # Fetch EGA studies via the EGA Public Metadata API (separate service; not a
+    # DOMAINS entry — see scripts/fetch_ega.py for why).
+    log.info("─── Running fetch_ega ───")
+    try:
+        import fetch_ega
+        fetch_ega.main()
+        log.info("fetch_ega ✓")
+    except Exception as exc:
+        log.error("fetch_ega failed: %s", exc)
 
 
 if __name__ == "__main__":

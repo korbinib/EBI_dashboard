@@ -57,33 +57,36 @@ jobs:
           
       - name: Pull latest code on server
         run: |
+          # set -e + an explicit clone-vs-pull branch: if WORKDIR exists but is
+          # not a git repo, fail loudly here instead of falling through to fire
+          # Snakemake on a stale/broken tree (the old `pull || clone && setup`
+          # chain could do exactly that).
           ssh "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" \
-            "git -C '${{ secrets.REMOTE_WORKDIR }}' pull --rebase || { \
-              git -C '${{ secrets.REMOTE_WORKDIR }}' clean -fd && \
-              git -C '${{ secrets.REMOTE_WORKDIR }}' pull; \
-            } || { \
-              rm -rf '${{ secrets.REMOTE_WORKDIR }}' && \
-              git clone https://github.com/${{ github.repository }} '${{ secrets.REMOTE_WORKDIR }}'; \
-            } && \
-            cd '${{ secrets.REMOTE_WORKDIR }}' && \
-            python3 -m venv .venv && \
-            . .venv/bin/activate && \
-            grep -v '^r::' requirements.txt | python3 -m pip install -q -r /dev/stdin && \
-            mkdir -p logs && \
-            Rscript -e '
-              pkgs <- readLines(\"requirements.txt\")
-              pkgs <- pkgs[startsWith(pkgs, \"r::\")]
-              pkgs <- sub(\"^r::\", \"\", pkgs)
-              pkgs <- sub(\";$\", \"\", pkgs)
-              pkgs <- trimws(pkgs)
-              missing <- pkgs[!pkgs %in% installed.packages()[,\"Package\"]]
-              if (length(missing)) {
-                cat(\"Installing R packages:\", paste(missing, collapse=\", \"), \"\\n\")
-                install.packages(missing, repos=\"https://cloud.r-project.org\", quiet=TRUE)
-              } else {
-                cat(\"All R packages already installed\\n\")
-              }
-            '"
+            "set -e && \
+             if [ -d '${{ secrets.REMOTE_WORKDIR }}/.git' ]; then \
+               git -C '${{ secrets.REMOTE_WORKDIR }}' pull; \
+             else \
+               git clone https://github.com/${{ github.repository }} '${{ secrets.REMOTE_WORKDIR }}'; \
+             fi && \
+             cd '${{ secrets.REMOTE_WORKDIR }}' && \
+             python3 -m venv .venv && \
+             . .venv/bin/activate && \
+             grep -v '^r::' requirements.txt | python3 -m pip install -q -r /dev/stdin && \
+             mkdir -p logs && \
+             Rscript -e '
+               pkgs <- readLines(\"requirements.txt\")
+               pkgs <- pkgs[startsWith(pkgs, \"r::\")]
+               pkgs <- sub(\"^r::\", \"\", pkgs)
+               pkgs <- sub(\";$\", \"\", pkgs)
+               pkgs <- trimws(pkgs)
+               missing <- pkgs[!pkgs %in% installed.packages()[,\"Package\"]]
+               if (length(missing)) {
+                 cat(\"Installing R packages:\", paste(missing, collapse=\", \"), \"\\n\")
+                 install.packages(missing, repos=\"https://cloud.r-project.org\", quiet=TRUE)
+               } else {
+                 cat(\"All R packages already installed\\n\")
+               }
+             '"
 
       - name: Remove stale sentinel (if any)
         run: |
