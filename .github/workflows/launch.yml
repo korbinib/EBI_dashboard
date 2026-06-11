@@ -54,7 +54,7 @@ jobs:
             echo "A Snakemake run is already active on the server – skipping launch."
             exit 0
           fi
-
+          
       - name: Pull latest code on server
         run: |
           # set -e + an explicit clone-vs-pull branch: if WORKDIR exists but is
