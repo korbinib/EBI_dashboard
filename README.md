@@ -1,6 +1,6 @@
 # Norwegian EBI Submissions Dashboard
 
-> **Daily-updated tracker of Norwegian research data deposited in EBI repositories.**  
+> **Weekly-updated tracker of Norwegian research data deposited in EBI repositories.**  
 > Data is fetched automatically via GitHub Actions, institution names are normalised
 > against a curated list, and bar plots are rendered with R/ggplot2 (Shiny-ready).
 
