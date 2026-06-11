@@ -79,6 +79,8 @@ DOMAIN_LABELS <- c(
   "metabolights"     = "MetaboLights",
   "pride"            = "PRIDE",
   "biomodels"        = "BioModels",
+  "ega"              = "EGA",
+  "ega-sample"       = "EGA Samples",
   "ENA"              = "ENA Studies",
   "sra-sample"       = "ENA Samples"
 )
@@ -130,8 +132,12 @@ ABBREV_LU <- local({
 })
 
 # Map a canonical institution name to its abbreviation; leave unrecognised
-# values (including "Other Norway") unchanged.
+# values (including "Other Norway") unchanged.  Guard the [[ ]] lookup: indexing
+# a named atomic vector with an absent name errors ("subscript out of bounds"),
+# which fires for every value not in the map (e.g. "Other Norway").
 to_abbrev <- function(canonical) {
+  if (is.null(canonical) || is.na(canonical) || !nzchar(canonical)) return(canonical)
+  if (!canonical %in% names(ABBREV_LU)) return(canonical)
   ab <- ABBREV_LU[[canonical]]
   if (!is.null(ab) && !is.na(ab) && nzchar(ab)) ab else canonical
 }

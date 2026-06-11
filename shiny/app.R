@@ -183,9 +183,15 @@ plot_time_by_domain <- function(df,
 }
 
 # ── Derived constants ─────────────────────────────────────────────────────────
+# Guard against an empty / all-NA CSV: range()/max() on no values return
+# Inf/-Inf, which would feed Inf into the year sliderInput and the "Latest entry"
+# label.  Fall back to a sane window when there is no dated data yet.
 domain_choices  <- sort(unique(df$domain_label))
-year_range_data <- range(df$year, na.rm = TRUE)
-latest_date     <- max(df$date, na.rm = TRUE)
+valid_years     <- df$year[!is.na(df$year)]
+this_year       <- as.integer(format(Sys.Date(), "%Y"))
+year_range_data <- if (length(valid_years)) range(valid_years) else c(2000L, this_year)
+valid_dates     <- df$date[!is.na(df$date)]
+latest_date     <- if (length(valid_dates)) max(valid_dates) else Sys.Date()
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 ui <- fluidPage(

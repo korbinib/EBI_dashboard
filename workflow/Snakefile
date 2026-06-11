@@ -115,6 +115,33 @@ rule join_ena:
         "python3 scripts/join_ena.py > {log} 2>&1"
 
 
+# ── Stage 2b: fetch EGA studies (separate API) ────────────────────────────────
+
+rule fetch_ega:
+    """
+    Fetch Norwegian EGA studies via the EGA Public Metadata API (a different
+    service from the EBI Search API used by every other domain).  Walks
+    DACs → datasets → studies, keeping studies linked to a Norwegian DAC, and
+    writes studies and samples in the same {id, fields} shape so the R render
+    step picks them up generically.  See scripts/fetch_ega.py.
+    """
+    output:
+        studies = "data/raw/ega/latest.json",
+        samples = "data/raw/ega-sample/latest.json",
+    params:
+        # run_date changes daily so the params rerun-trigger re-fetches EGA on
+        # every run.  Without it this rule has no input/params, so on the
+        # persistent workdir Snakemake would see the output already exists and
+        # never refresh it — mirrors the fetch_domain rule.
+        run_date = lambda wc: __import__("datetime").date.today().isoformat()
+    resources:
+        ebi_conns = 1
+    log:
+        "logs/fetch_ega.log"
+    shell:
+        "python3 scripts/fetch_ega.py > {log} 2>&1"
+
+
 # ── Stage 3: render R plots and CSV ───────────────────────────────────────────
 
 rule render:
@@ -123,9 +150,11 @@ rule render:
     norwegian_entries.csv consumed by both the commit job and Shinylive.
     """
     input:
-        ena      = "data/processed/ena_joined.json",
-        standard = expand("data/raw/{domain}/latest.json",
-                          domain=STANDARD_DOMAINS),
+        ena         = "data/processed/ena_joined.json",
+        ega         = "data/raw/ega/latest.json",
+        ega_sample  = "data/raw/ega-sample/latest.json",
+        standard    = expand("data/raw/{domain}/latest.json",
+                             domain=STANDARD_DOMAINS),
     output:
         csv      = "output/norwegian_entries.csv",
         year_png = "output/norwegian_ebi_year.png",
