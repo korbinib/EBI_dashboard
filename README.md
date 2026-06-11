@@ -52,12 +52,27 @@ GitHub Actions (cron 02:30 UTC)
 │    └─ Writes data/raw/ega/latest.json + data/raw/ega-sample/latest.json
 │       (same {id, fields} shape as the EBI Search domains)
 │
+├─ scripts/fetch_identifiers.py
+│    ├─ Caches the identifiers.org namespace registry (prefix → pattern)
+│    └─ Writes data/identifiers_namespaces.json
+│
 └─ R/plot_norwegian_data.R
      ├─ Loads all latest.json + ena_joined.json
      ├─ Filters rows mentioning Norway/Norge/Norwegian in affil/country fields
      ├─ Normalises institution names (regex → fuzzy fallback → "Other Norway")
+     ├─ Builds identifiers.org links (validated against the registry pattern)
      └─ Saves PNG plots + norwegian_entries.csv to output/
 ```
+
+### Accession links (identifiers.org)
+
+Each domain declares an `identifiers_prefix` in its definition (e.g. `pride` →
+`pride.project`, `sra-study` → `["insdc.sra", "bioproject"]`).  The render step
+checks every accession against that prefix's [identifiers.org](https://identifiers.org)
+registry pattern and, on a match, builds a `https://identifiers.org/<prefix>:<acc>`
+link (an unmatched or mis-mapped accession simply gets no link).  These render as
+clickable accessions in the Shiny dashboard's table.  EGA samples (`EGAN…`) have
+no identifiers.org namespace, so they are left unlinked.
 
 ---
 

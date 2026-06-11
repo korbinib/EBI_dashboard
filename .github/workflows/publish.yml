@@ -129,7 +129,8 @@ jobs:
           # Commit only canonical artefacts.  The dated snapshots
           # (data/processed/ena_joined_<date>.json) are deliberately excluded so
           # the repo doesn't grow unbounded one file per run.
-          git add -f data/processed/ena_joined.json data/domains.json output/
+          git add -f data/processed/ena_joined.json data/domains.json \
+                     data/identifiers_namespaces.json output/
           if git diff --cached --quiet; then
             echo "Nothing changed – skipping commit."
           else

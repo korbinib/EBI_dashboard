@@ -142,6 +142,26 @@ rule fetch_ega:
         "python3 scripts/fetch_ega.py > {log} 2>&1"
 
 
+# ── Stage 2c: cache identifiers.org namespace registry ────────────────────────
+
+rule fetch_identifiers:
+    """
+    Cache the identifiers.org namespace registry (prefix → validation pattern)
+    so the render step can build https://identifiers.org/<prefix>:<acc> links.
+    See scripts/fetch_identifiers.py.  Failure is non-fatal inside the script.
+    """
+    output:
+        "data/identifiers_namespaces.json"
+    params:
+        run_date = lambda wc: __import__("datetime").date.today().isoformat()
+    resources:
+        ebi_conns = 1
+    log:
+        "logs/fetch_identifiers.log"
+    shell:
+        "python3 scripts/fetch_identifiers.py > {log} 2>&1"
+
+
 # ── Stage 3: render R plots and CSV ───────────────────────────────────────────
 
 rule render:
@@ -153,6 +173,8 @@ rule render:
         ena         = "data/processed/ena_joined.json",
         ega         = "data/raw/ega/latest.json",
         ega_sample  = "data/raw/ega-sample/latest.json",
+        identifiers = "data/identifiers_namespaces.json",
+        domains     = "data/domains.json",
         standard    = expand("data/raw/{domain}/latest.json",
                              domain=STANDARD_DOMAINS),
     output:

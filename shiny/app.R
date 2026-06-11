@@ -42,10 +42,14 @@ df <- readr::read_csv(
     broker        = col_character(),
     affiliation   = col_character(),
     country       = col_character(),
-    email         = col_character()
+    email         = col_character(),
+    identifier_url = col_character()
   ),
   show_col_types = FALSE
 )
+
+# Tolerate an older CSV that predates the identifiers.org link column.
+if (!"identifier_url" %in% names(df)) df$identifier_url <- NA_character_
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -335,6 +339,10 @@ server <- function(input, output, session) {
              !is.na(year),
              year >= input$year_range[1],
              year <= input$year_range[2]) |>
+      mutate(accession = ifelse(
+        is.na(identifier_url) | !nzchar(identifier_url), accession,
+        sprintf('<a href="%s" target="_blank" rel="noopener">%s</a>',
+                identifier_url, accession))) |>
       select(
         Repository  = domain_label,
         Accession   = accession,
@@ -345,7 +353,10 @@ server <- function(input, output, session) {
         Email       = email
       ) |>
       arrange(desc(Date))
-  }, options = list(pageLength = 10, scrollX = TRUE), filter = "top")
+    # Escape every column by name except Accession, which holds the link HTML.
+    # (Column names avoid the rownames-offset ambiguity of numeric indices.)
+  }, options = list(pageLength = 10, scrollX = TRUE), filter = "top",
+     escape = c("Repository", "Title", "Date", "Institution", "Broker", "Email"))
 }
 
 shinyApp(ui, server)

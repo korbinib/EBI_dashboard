@@ -115,6 +115,10 @@ DOMAINS: dict[str, dict] = {
             "journal_name", "legend", "license", "method", "modified_date",
             "name", "omics_type", "release_date", "repository", "species",
         ],
+        # identifiers.org prefix(es) for this domain's accessions; consumed by
+        # the R render step to build https://identifiers.org/<prefix>:<acc> links
+        # (the accession is validated against the registry pattern first).
+        "identifiers_prefix": "biostudies",
     },
     "biostudies-other": {
         "required_fields": [
@@ -125,6 +129,7 @@ DOMAINS: dict[str, dict] = {
             "pagination", "pmcid", "project", "pub_date", "release_date",
             "repository", "species", "volume",
         ],
+        "identifiers_prefix": "biostudies",
     },
     "metabolights": {
         "required_fields": [
@@ -136,6 +141,7 @@ DOMAINS: dict[str, dict] = {
             "submitter_affiliation", "submitter_email", "submitter_name",
             "technology_type",
         ],
+        "identifiers_prefix": "metabolights",
     },
     "pride": {
         "required_fields": [
@@ -149,6 +155,7 @@ DOMAINS: dict[str, dict] = {
             "submitter_affiliation", "submitter_country", "submitter_keywords",
             "submitter_mail", "technology_type", "tissue",
         ],
+        "identifiers_prefix": "pride.project",
     },
     "biomodels": {
         "required_fields": [
@@ -163,6 +170,7 @@ DOMAINS: dict[str, dict] = {
             "submitter", "submitter_affiliation", "submitter_keywords",
             "submitter_mail", "tokenised_name",
         ],
+        "identifiers_prefix": "biomodels.db",
     },
     # EGA (European Genome-phenome Archive): NOT a DOMAINS entry because the EBI
     # Search index returns only id/description/name for it — no dates and no
@@ -178,6 +186,9 @@ DOMAINS: dict[str, dict] = {
         # first_public_date is not searchable in sra-study; total ≈730K (<1M)
         # so standard single-pass pagination handles it without partitioning.
         "join_key": "study_accession",
+        # ENA/SRA study accessions are SRP/ERP/DRP (insdc.sra) or PRJ* (bioproject);
+        # the render tries each prefix and links the one whose pattern matches.
+        "identifiers_prefix": ["insdc.sra", "bioproject"],
     },
     "sra-sample": {
         "required_fields": [
@@ -189,6 +200,7 @@ DOMAINS: dict[str, dict] = {
         ],
         "partition_date_field": "first_public_date",
         "join_key": "sample_accession",
+        "identifiers_prefix": "biosample",
     },
     "sra-experiment": {
         "required_fields": [
@@ -202,6 +214,7 @@ DOMAINS: dict[str, dict] = {
         ],
         "partition_date_field": "first_public_date",
         "join_key": "study_accession",
+        "identifiers_prefix": ["insdc.sra", "bioproject"],
     },
 }
 
@@ -702,6 +715,15 @@ def main():
 
     log.info("Starting EBI fetch (sequential / local)  date=%s", TODAY)
     save_domains_json()
+
+    # Cache the identifiers.org namespace registry for the link feature.  Failure
+    # is non-fatal (the render step simply skips links it can't build).
+    log.info("─── Caching identifiers.org namespaces ───")
+    try:
+        import fetch_identifiers
+        fetch_identifiers.main()
+    except Exception as exc:
+        log.error("fetch_identifiers failed: %s", exc)
 
     # Build the Norwegian filter once and reuse it across all domains.
     geo_tokens   = load_geo_tokens()
