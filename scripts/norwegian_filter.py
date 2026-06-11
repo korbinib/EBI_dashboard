@@ -98,6 +98,33 @@ def load_geo_tokens(path=INSTITUTION_MAP) -> list[str]:
     return sorted(set(result))
 
 
+def _institution_name_patterns(inst: dict) -> list[str]:
+    """
+    Escaped, word-bounded regexes for an institution's identifying names so an
+    entry mentioning any of them counts as Norwegian, even when the curated
+    `patterns` list doesn't spell that variant out:
+
+      canonical      English name      "University of Bergen"
+      canonical_no   Norwegian name    "Universitetet i Bergen"
+      abbrev         abbreviation      "UiB"
+      ror            ROR id            "03zga2b32" (matched, not the full URL)
+
+    Escaping + \\b boundaries keep these literal (no accidental regex meaning,
+    and "UiB" won't match inside another word).
+    """
+    out: list[str] = []
+    for key in ("canonical", "canonical_no", "abbrev"):
+        v = inst.get(key)
+        if isinstance(v, str) and v.strip():
+            out.append(r"\b" + re.escape(v.strip()) + r"\b")
+    ror = inst.get("ror")
+    if isinstance(ror, str) and ror.strip():
+        ror_id = ror.strip().rstrip("/").rsplit("/", 1)[-1]   # id after last '/'
+        if ror_id:
+            out.append(r"\b" + re.escape(ror_id) + r"\b")
+    return out
+
+
 def load_institution_regexes(path=INSTITUTION_MAP) -> list[re.Pattern]:
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -107,7 +134,8 @@ def load_institution_regexes(path=INSTITUTION_MAP) -> list[re.Pattern]:
         return []
     compiled: list[re.Pattern] = []
     for inst in data.get("institutions", []):
-        for p in inst.get("patterns", []):
+        # Curated regex patterns first, then literal name/abbrev/ROR fallbacks.
+        for p in list(inst.get("patterns", [])) + _institution_name_patterns(inst):
             try:
                 compiled.append(re.compile(p, re.IGNORECASE))
             except re.error as exc:

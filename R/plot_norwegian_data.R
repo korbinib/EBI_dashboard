@@ -224,8 +224,13 @@ parse_ebi_date <- function(x) {
 #' Matching priority:
 #'   1. Email domain lookup  (@uio.no → "University of Oslo", decisive signal)
 #'   2. Regex pattern matching on combined affiliation text
+#'   2b. Exact Norwegian-name match (canonical_no, e.g. "Universitetet i Oslo")
 #'   3. Per-token Jaro-Winkler against abbreviations (catches "UiO"/"NTNU" in noisy strings)
-#'   4. Full-string Jaro-Winkler against canonical names (informal long-form names)
+#'   4. Full-string Jaro-Winkler against canonical AND canonical_no names
+#'
+#' canonical_no (the Norwegian-language institution name) is folded into both the
+#' literal match (2b) and the fuzzy fallback (4); either way the English
+#' `canonical` name is returned so the display value stays consistent.
 #'
 #' Returns the canonical institution name, or "Other Norway" if nothing matches.
 normalise_institution <- function(affil_vec, email_vec = character(0)) {
@@ -248,9 +253,19 @@ normalise_institution <- function(affil_vec, email_vec = character(0)) {
     }
   }
 
-  # 3 & 4. Fuzzy fallback.
-  all_canonical <- sapply(inst_map$institutions, `[[`, "canonical")
-  all_abbrevs   <- sapply(inst_map$institutions, `[[`, "abbrev")
+  all_canonical    <- sapply(inst_map$institutions, `[[`, "canonical")
+  all_canonical_no <- sapply(inst_map$institutions,
+                             function(i) i$canonical_no %||% NA_character_)
+  all_abbrevs      <- sapply(inst_map$institutions, `[[`, "abbrev")
+
+  # 2b. Exact (case-insensitive, literal) match on the Norwegian name.
+  affil_lc <- tolower(affil)
+  for (i in seq_along(all_canonical_no)) {
+    cno <- all_canonical_no[i]
+    if (!is.na(cno) && nzchar(cno) && grepl(tolower(cno), affil_lc, fixed = TRUE)) {
+      return(all_canonical[i])
+    }
+  }
 
   # 3. Per-token JW against abbreviations (abbreviation-length tokens only).
   tokens <- unlist(strsplit(affil, "[,;/()\\s]+"))
@@ -261,10 +276,13 @@ normalise_institution <- function(affil_vec, email_vec = character(0)) {
     if (dist_abbr[best] < 0.15) return(all_canonical[best])
   }
 
-  # 4. Full-string JW against canonical names (run once, outside the token loop).
-  dist_full <- stringdist(tolower(affil), tolower(all_canonical), method = "jw")
+  # 4. Full-string JW against both English and Norwegian names; per institution
+  #    take the better of the two, then return the English canonical.
+  dist_en <- stringdist(affil_lc, tolower(all_canonical),    method = "jw")
+  dist_no <- stringdist(affil_lc, tolower(all_canonical_no), method = "jw")
+  dist_full <- pmin(dist_en, dist_no, na.rm = TRUE)
   best_full <- which.min(dist_full)
-  if (dist_full[best_full] < 0.22) return(all_canonical[best_full])
+  if (length(best_full) && dist_full[best_full] < 0.22) return(all_canonical[best_full])
 
   "Other Norway"
 }
