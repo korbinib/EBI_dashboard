@@ -127,14 +127,16 @@ Edit `data/institution_map.json` and add an entry:
 
 On Ubuntu 26.04 LTS
 
-``bash
-r-base build-essential pkg-config git make \
+```bash
+
+sudo apt-get install r-base build-essential pkg-config git make \
 libcurl4-openssl-dev libssl-dev libxml2-dev zlib1g-dev libicu-dev \
 libfontconfig1-dev libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev \
 libharfbuzz-dev libfribidi-dev libcairo2-dev libpango1.0-dev libx11-dev libxt-dev \
 libblas-dev liblapack-dev libopenblas-dev gfortran libgfortran5 \
 liblzma-dev libbz2-dev libreadline-dev libsqlite3-dev libpq-dev \
 libgit2-dev libgmp-dev libglpk-dev imagemagick
+
 ```
 
 
